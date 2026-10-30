@@ -1,7 +1,7 @@
 {
   "name": "commandcode-bridge",
   "displayName": "Command Code Bridge",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Use your Command Code subscription (DeepSeek, Kimi, GLM, Qwen and more) from Claude Code: delegate tasks to cheaper models as subagents, route turns, hand off a conversation, and watch your credit limits.",
   "author": { "name": "EvrenGP", "url": "https://github.com/EvrenGP" },
   "license": "MIT",

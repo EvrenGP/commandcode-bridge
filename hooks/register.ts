@@ -527,7 +527,7 @@ async function buildContext(
   return body
 }
 
-function composePrompt(task: string, mode: Mode, context: string | null, profile: CcAgent | null): string {
+function composePrompt(task: string, mode: Mode, context: string | null, profile: CcAgent | null, maxTurns: number): string {
   const rules =
     mode === 'read'
       ? 'Do not modify any file; read, search and reason only.'
@@ -542,7 +542,9 @@ function composePrompt(task: string, mode: Mode, context: string | null, profile
       )}${profile.tools ? `\n\nIts declared tools: ${profile.tools}.` : ''}\n`
     : ''
   return assemblePrompt(
-    `You are a subagent working for Claude Code. ${rules}${role}${shared}\n\nTask:\n${task}\n\nEnd with a concise report: what you found or changed, files touched, anything left open.`,
+    `You are a subagent working for Claude Code. ${rules}${role}${shared}\n\nTask:\n${task}\n\n` +
+      `You have at most ${maxTurns} turns: batch tool calls, and keep the last turn for the answer. ` +
+      'End with a concise report: what you found or changed, files touched, anything left open.',
     MAX_PROMPT,
   )
 }
@@ -573,6 +575,8 @@ type RunOutcome = {
   error: string
   cancelled: boolean
   blocked: string[]
+  /** Command Code's own stop reason: end_turn, max_turns, interrupted, run_error. */
+  stopReason: string
 }
 
 async function runCommandCode(
@@ -604,6 +608,7 @@ async function runCommandCode(
     error: '',
     cancelled: false,
     blocked: [],
+    stopReason: '',
   }
   let buffer = ''
   let turn = 0
@@ -636,6 +641,7 @@ async function runCommandCode(
       else if (ev.type === 'run_end') {
         const result = ev.result ?? {}
         if (typeof result.finalText === 'string') out.text = result.finalText
+        if (typeof result.stopReason === 'string') out.stopReason = result.stopReason
         if (result.sessionId) out.sessionId = result.sessionId
         usage(result.usage)
       } else if (typeof ev.type === 'string' && /tool/.test(ev.type)) {
@@ -1420,17 +1426,43 @@ export const register: Register = (on) => {
       }
     }
 
+    const maxTurns = Math.max(1, Math.min(200, Math.round(input.maxTurns ?? cfg.maxTurns)))
     const runArgs = {
-      prompt: composePrompt(input.prompt, mode, context, profile),
+      prompt: composePrompt(input.prompt, mode, context, profile, maxTurns),
       model,
       mode,
       resume: known?.sessionId ?? '',
-      maxTurns: Math.max(1, Math.min(200, Math.round(input.maxTurns ?? cfg.maxTurns))),
+      maxTurns,
       label,
     }
     let outcome = await runCommandCode($, runArgs, next.signal)
     if (retriable(outcome.text, outcome.error, outcome.cancelled)) {
       outcome = await runCommandCode($, { ...runArgs, label: `${label} · ${tx('retry', '2. deneme')}` }, next.signal)
+    }
+    // The turn limit cut the work before its report: the text is whatever the
+    // agent said early on. Resume that session once, tools off in spirit, for the answer.
+    let cutShort = false
+    if (outcome.stopReason === 'max_turns' && !outcome.cancelled && !outcome.error && outcome.sessionId) {
+      const first = outcome
+      const wrap = await runCommandCode(
+        $,
+        {
+          ...runArgs,
+          prompt:
+            'You reached the turn limit. Do not call any more tools. Using what you have already found, give the final answer now, in exactly the format the task asked for. Mark anything you could not check as unchecked.',
+          resume: outcome.sessionId,
+          maxTurns: 2,
+          label: `${label} · ${tx('wrap-up', 'toparlama')}`,
+        },
+        next.signal,
+      )
+      outcome = {
+        ...wrap,
+        inputTokens: first.inputTokens + wrap.inputTokens,
+        outputTokens: first.outputTokens + wrap.outputTokens,
+        blocked: [...first.blocked, ...wrap.blocked],
+      }
+      cutShort = wrap.stopReason === 'max_turns'
     }
     if (!outcome.text && !outcome.error && !outcome.cancelled) outcome.error = 'The model produced no response.'
     const durationMs = (await $.clock.now()) - now
@@ -1484,8 +1516,18 @@ export const register: Register = (on) => {
     const blocked = outcome.blocked.length
       ? `\n\n${tx('Blocked tools', 'Engellenen araçlar')}: ${[...new Set(outcome.blocked)].join(', ')} (${mode} ${tx('tier', 'katmanı')}).`
       : ''
-    const text = clip(outcome.text || tx('(no final text)', '(son metin yok)'), MAX_RESULT)
-    if (cacheable) await cachePut($, cacheKey, { at: now, text, meta }, cfg.cacheTtlMin)
+    const limitNote = cutShort
+      ? tx(
+          `
+
+[Turn limit reached twice: this answer may be incomplete. Rerun with a higher maxTurns or a narrower task.]`,
+          `
+
+[Tur limiti iki kez doldu: bu cevap eksik olabilir. Daha yüksek maxTurns ya da daha dar bir görevle tekrar çalıştır.]`,
+        )
+      : ''
+    const text = clip(outcome.text || tx('(no final text)', '(son metin yok)'), MAX_RESULT) + limitNote
+    if (cacheable && !cutShort) await cachePut($, cacheKey, { at: now, text, meta }, cfg.cacheTtlMin)
     return { result: `${text}${blocked}\n\n---\n${meta}` }
   })
 
