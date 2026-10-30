@@ -26,17 +26,27 @@ commandcode login
 
 ## Install
 
-At the prompt of a Claude Code session:
-
-```
-/plugin install commandcode-bridge --marketplace EvrenGP/commandcode-bridge
-```
-
-Answer `y` to add the marketplace, then pick a scope. From a shell instead:
+From a shell, add the marketplace, then install the plugin from it:
 
 ```bash
-claude plugin install commandcode-bridge --marketplace EvrenGP/commandcode-bridge
+claude plugin marketplace add EvrenGP/commandcode-bridge
 ```
+
+```bash
+claude plugin install commandcode-bridge@commandcode-bridge
+```
+
+Or at the prompt of a Claude Code session:
+
+```
+/plugin marketplace add EvrenGP/commandcode-bridge
+```
+
+```
+/plugin install commandcode-bridge@commandcode-bridge
+```
+
+Restart Claude Code (or run `/reload-plugins`) afterwards.
 
 Then check that everything works:
 
