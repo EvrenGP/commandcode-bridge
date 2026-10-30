@@ -112,9 +112,21 @@ Everything the plugin does outside Claude Code, in full:
 - **Sends to Command Code** (through that CLI, to Command Code's servers, under your Command Code account): the task prompt and, when `context` is `recent` or `full`, the recent or full text of this conversation, capped by `maxContextChars`. Routed turns, `/compact` while routing is on, and `handoff` send or write the conversation the same way. Nothing is sent when you do not call `run`, route, compact while routing, or hand off.
 - **Reads** `~/.commandcode/auth.json` for your Command Code user name, login date and API key; Command Code transcripts under `~/.commandcode/projects/`; agent profiles under `.commandcode/agents` and `~/.commandcode/agents`.
 - **Fetches** your own usage from `https://api.commandcode.ai/alpha/billing/credits`, `/alpha/billing/subscriptions` and `/alpha/usage/summary`, sending the API key from `auth.json` as a Bearer token: the same requests Command Code's `/usage` makes. This happens for `/commandcode usage`, `/commandcode doctor`, the `/commandcode` overview, the `usage` tool, and once after each `run`. The key goes to no other host.
-- **Writes** a handoff transcript under `~/.commandcode/projects/` when you run `handoff`; keeps its settings, permissions, run history and answer cache in Claude Code's plugin store.
+- **Writes** a handoff transcript (`~/.commandcode/projects/<project>/<session>.jsonl`, a Command Code session file that `commandcode --session` resumes) when you run `handoff`; keeps its settings, permissions, run history and answer cache in Claude Code's plugin store.
 
 It sends no telemetry and contacts no other server.
+
+Why it reads the Command Code key from `~/.commandcode/auth.json` instead of asking for it: it is the key the Command Code CLI itself uses, so the usage numbers belong to the same account that runs your tasks, and you never paste a key into Claude Code. The plugin never stores, logs or prints it, and sends it only to `api.commandcode.ai`.
+
+## What each hook does
+
+- `session.start`: registers the tools above and the `/commandcode` command.
+- `turn.step`: only while routing is on (`/commandcode continue` or `route on`), answers the turn with Command Code's reply instead of Claude's; otherwise passes the turn on unchanged.
+- `tool.call`: answers only this plugin's own tools (`run`, `transcript`, `agents`, `models`, `usage`, `handoff`); every other tool call is untouched.
+- `model.complete` and `session.compact`: only while routing is on, produce Claude Code's internal completions and the `/compact` summary with Command Code, so they work when Claude's quota is out; otherwise passed on unchanged.
+- `command.run`: answers only the `/commandcode` command. It changes no Claude Code setting or permission; `edit` and `full` runs always ask you first (see Permission tiers).
+- `session.measure`: reads Claude's usage and shows one toast at `warnAtPercent`.
+- `/commandcode continue <note>` submits your own note as the next prompt, nothing else.
 
 ## Notes
 

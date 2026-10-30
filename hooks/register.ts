@@ -290,7 +290,7 @@ function allModels(): CatalogueModel[] {
   )
 }
 
-async function setConfigOf($: $, patch: Partial<Config>): Promise<void> {
+async function setConfigOf($: Engine, patch: Partial<Config>): Promise<void> {
   const stored = ((await $.store.get('config')) ?? {}) as Partial<Config>
   await $.store.set('config', { ...stored, ...patch })
 }
@@ -332,7 +332,7 @@ const MAX_COMPLETE = 400000
 const MAX_RESULT = 60000
 const MAX_READ = 4 * 1024 * 1024
 
-type $ = EngineInterface
+type Engine = EngineInterface
 
 function join(...parts: string[]): string {
   return parts
@@ -394,30 +394,30 @@ function cleanText(text: string): string {
     .trim()
 }
 
-async function config($: $): Promise<Config> {
+async function config($: Engine): Promise<Config> {
   const stored = ((await $.store.get('config')) ?? {}) as Partial<Config>
   const cfg = { ...DEFAULTS, ...stored }
   lang = cfg.lang === 'tr' || cfg.lang === 'en' ? cfg.lang : systemLang()
   return cfg
 }
 
-async function projectKey($: $): Promise<string> {
+async function projectKey($: Engine): Promise<string> {
   return (await $.session.root()).toLowerCase()
 }
 
-async function homeDir($: $): Promise<string> {
+async function homeDir($: Engine): Promise<string> {
   return (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '.'
 }
 
-async function ccHome($: $): Promise<string> {
+async function ccHome($: Engine): Promise<string> {
   return join(await homeDir($), '.commandcode')
 }
 
-async function isWindows($: $): Promise<boolean> {
+async function isWindows($: Engine): Promise<boolean> {
   return (await $.env.get('APPDATA')) !== undefined
 }
 
-async function cliArgv($: $, cfg: Config): Promise<string[]> {
+async function cliArgv($: Engine, cfg: Config): Promise<string[]> {
   const given = cfg.cliPath.trim()
   if (given) return /\.(m?js|cjs)$/i.test(given) ? ['node', given] : [given]
   const appData = await $.env.get('APPDATA')
@@ -429,14 +429,14 @@ async function cliArgv($: $, cfg: Config): Promise<string[]> {
   return ['commandcode']
 }
 
-async function guardPath($: $): Promise<string> {
+async function guardPath($: Engine): Promise<string> {
   return nativePath(join($.plugin.root, 'guard-edit-only.ts'), await isWindows($))
 }
 
 // What each tier hands Command Code. read keeps its headless defaults, which
 // withhold the writing and shell tools. Command Code's print mode opens those
 // only under --yolo, so edit pairs it with a guard mod that blocks the shell.
-async function modeFlags($: $, mode: Mode): Promise<string[]> {
+async function modeFlags($: Engine, mode: Mode): Promise<string[]> {
   if (mode === 'read') return []
   if (mode === 'full') return ['--yolo']
   return ['--yolo', '--mod', await guardPath($)]
@@ -444,18 +444,18 @@ async function modeFlags($: $, mode: Mode): Promise<string[]> {
 
 // --- permissions ----------------------------------------------------------
 
-async function grants($: $): Promise<Grants> {
+async function grants($: Engine): Promise<Grants> {
   return ((await $.store.get(`grants:${await projectKey($)}`)) ?? {}) as Grants
 }
 
-async function setGrant($: $, mode: 'edit' | 'full', value: boolean): Promise<void> {
+async function setGrant($: Engine, mode: 'edit' | 'full', value: boolean): Promise<void> {
   const key = `grants:${await projectKey($)}`
   const current = ((await $.store.get(key)) ?? {}) as Grants
   await $.store.set(key, { ...current, [mode]: value })
 }
 
 /** read is always allowed; edit and full need the person, once or for the project. */
-async function permit($: $, mode: Mode, summary: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+async function permit($: Engine, mode: Mode, summary: string): Promise<{ ok: true } | { ok: false; reason: string }> {
   if (mode === 'read') return { ok: true }
   if ((await grants($))[mode]) return { ok: true }
   const ONCE = tx('Allow this time', 'Bu sefer izin ver')
@@ -495,7 +495,7 @@ function assemblePrompt(text: string, max: number): string {
  * file was never readable.
  */
 async function buildContext(
-  $: $,
+  $: Engine,
   scope: ContextScope,
   cfg: Config,
   omitLastUser = false,
@@ -576,7 +576,7 @@ type RunOutcome = {
 }
 
 async function runCommandCode(
-  $: $,
+  $: Engine,
   args: { prompt: string; model: string; mode: Mode; resume: string; maxTurns: number; label: string },
   signal: AbortSignal | undefined,
 ): Promise<RunOutcome> {
@@ -725,22 +725,22 @@ type RouteOutcome = {
 
 // --- routed turns: this session's answers come from Command Code -----------
 
-async function routeOf($: $, claudeSessionId: string): Promise<RouteSession | null> {
+async function routeOf($: Engine, claudeSessionId: string): Promise<RouteSession | null> {
   return ((await $.store.get(`route:${claudeSessionId}`)) ?? null) as RouteSession | null
 }
 
-async function saveRoute($: $, claudeSessionId: string, record: RouteSession | null): Promise<void> {
+async function saveRoute($: Engine, claudeSessionId: string, record: RouteSession | null): Promise<void> {
   const key = `route:${claudeSessionId}`
   if (record) await $.store.set(key, record)
   else await $.store.delete(key)
 }
 
 /** `/commandcode continue` routes this conversation only; `route on` routes every one. */
-async function sessionRouteOn($: $, claudeSessionId: string): Promise<boolean> {
+async function sessionRouteOn($: Engine, claudeSessionId: string): Promise<boolean> {
   return (await $.store.get(`routeon:${claudeSessionId}`)) === true
 }
 
-async function setSessionRoute($: $, claudeSessionId: string, on: boolean): Promise<void> {
+async function setSessionRoute($: Engine, claudeSessionId: string, on: boolean): Promise<void> {
   const key = `routeon:${claudeSessionId}`
   if (on) await $.store.set(key, true)
   else await $.store.delete(key)
@@ -768,7 +768,7 @@ function turnUsageOf(out: RouteOutcome): {
  * `out` carries what the stream learned by the end.
  */
 async function* streamRoute(
-  $: $,
+  $: Engine,
   cfg: Config,
   opts: { prompt: string; model: string; mode: Mode; resume: string; maxTurns: number },
   signal: AbortSignal | undefined,
@@ -877,11 +877,11 @@ async function* streamRoute(
 
 // --- records --------------------------------------------------------------
 
-async function agentsOf($: $): Promise<Record<string, AgentRecord>> {
+async function agentsOf($: Engine): Promise<Record<string, AgentRecord>> {
   return ((await $.store.get(`agents:${await projectKey($)}`)) ?? {}) as Record<string, AgentRecord>
 }
 
-async function saveAgent($: $, name: string, rec: AgentRecord | null): Promise<void> {
+async function saveAgent($: Engine, name: string, rec: AgentRecord | null): Promise<void> {
   const key = `agents:${await projectKey($)}`
   const all = ((await $.store.get(key)) ?? {}) as Record<string, AgentRecord>
   if (rec) all[name] = rec
@@ -889,19 +889,19 @@ async function saveAgent($: $, name: string, rec: AgentRecord | null): Promise<v
   await $.store.set(key, all)
 }
 
-async function addRun($: $, run: RunRecord): Promise<void> {
+async function addRun($: Engine, run: RunRecord): Promise<void> {
   const runs = ((await $.store.get('runs')) ?? []) as RunRecord[]
   await $.store.set('runs', [...runs, run].slice(-MAX_RUNS))
 }
 
-async function cacheGet($: $, key: string, ttlMin: number): Promise<CacheEntry | null> {
+async function cacheGet($: Engine, key: string, ttlMin: number): Promise<CacheEntry | null> {
   const cache = ((await $.store.get('cache')) ?? {}) as Record<string, CacheEntry>
   const hit = cache[key]
   if (!hit) return null
   return (await $.clock.now()) - hit.at <= ttlMin * 60000 ? hit : null
 }
 
-async function cachePut($: $, key: string, entry: CacheEntry, ttlMin: number): Promise<void> {
+async function cachePut($: Engine, key: string, entry: CacheEntry, ttlMin: number): Promise<void> {
   const now = await $.clock.now()
   const cache = ((await $.store.get('cache')) ?? {}) as Record<string, CacheEntry>
   const kept = Object.entries(cache)
@@ -911,11 +911,11 @@ async function cachePut($: $, key: string, entry: CacheEntry, ttlMin: number): P
   await $.store.set('cache', Object.fromEntries([[key, entry], ...kept]))
 }
 
-async function lastHandoffs($: $): Promise<Handoff[]> {
+async function lastHandoffs($: Engine): Promise<Handoff[]> {
   return ((await $.store.get('handoffs')) ?? []) as Handoff[]
 }
 
-async function addHandoff($: $, handoff: Handoff): Promise<void> {
+async function addHandoff($: Engine, handoff: Handoff): Promise<void> {
   const all = await lastHandoffs($)
   await $.store.set(
     'handoffs',
@@ -946,7 +946,7 @@ function stripFrontmatter(raw: string): string {
   return raw.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '')
 }
 
-async function ccAgents($: $): Promise<CcAgent[]> {
+async function ccAgents($: Engine): Promise<CcAgent[]> {
   const cwd = await $.session.cwd()
   const sources: [string, 'project' | 'personal'][] = [
     [join(cwd, '.commandcode', 'agents'), 'project'],
@@ -985,7 +985,7 @@ async function ccAgents($: $): Promise<CcAgent[]> {
 
 // --- reading a Command Code transcript ------------------------------------
 
-async function findTranscript($: $, sessionId: string): Promise<string | null> {
+async function findTranscript($: Engine, sessionId: string): Promise<string | null> {
   const root = join(await ccHome($), 'projects')
   if (!(await $.fs.exists(root))) return null
   const id = sessionId.replace(/\.jsonl$/i, '')
@@ -1004,7 +1004,7 @@ function dropPartialLine(text: string): string {
 }
 
 /** `$.fs.read` refuses a file over 4 MiB, so a long transcript is tailed instead. */
-async function readTail($: $, path: string, maxBytes: number): Promise<string> {
+async function readTail($: Engine, path: string, maxBytes: number): Promise<string> {
   const stat = await $.fs.stat(path).catch(() => null)
   if (!stat) return ''
   if (stat.size <= MAX_READ) {
@@ -1093,7 +1093,7 @@ function ccBlocks(content: any[], keepThinking: boolean): Record<string, unknown
   return blocks
 }
 
-async function buildHandoff($: $, cfg: Config, note: string): Promise<Handoff> {
+async function buildHandoff($: Engine, cfg: Config, note: string): Promise<Handoff> {
   const messages = await $.session.messages({ as: 'api' })
   const cwd = await $.session.cwd()
   const windows = await isWindows($)
@@ -1434,7 +1434,7 @@ export const register: Register = (on) => {
     }
     let outcome = await runCommandCode($, runArgs, next.signal)
     if (retriable(outcome.text, outcome.error, outcome.cancelled)) {
-      outcome = await runCommandCode($, { ...runArgs, label: `${label} · 2. deneme` }, next.signal)
+      outcome = await runCommandCode($, { ...runArgs, label: `${label} · ${tx('retry', '2. deneme')}` }, next.signal)
     }
     if (!outcome.text && !outcome.error && !outcome.cancelled) outcome.error = 'The model produced no response.'
     const durationMs = (await $.clock.now()) - now
@@ -1796,7 +1796,7 @@ export const register: Register = (on) => {
 const ROUTE_KEYS = ['route', 'routeModel', 'routeMode', 'model']
 
 /** One wording for routing everywhere: what answers this conversation, and why. */
-async function routeState($: $, cfg: Config): Promise<string> {
+async function routeState($: Engine, cfg: Config): Promise<string> {
   if (cfg.route) return tx('on (all sessions, route on)', 'açık (tüm oturumlar, route on)')
   if (await sessionRouteOn($, await $.session.id())) {
     return tx('on (this conversation only, /commandcode continue)', 'açık (yalnız bu sohbet, /commandcode continue)')
@@ -1834,7 +1834,7 @@ const USAGE_API = 'https://api.commandcode.ai'
 let usageMemo: { at: number; value: Usage } | null = null
 
 /** What /usage in Command Code shows, read from the same endpoints with the CLI's own key. */
-async function fetchUsage($: $, maxAgeMs = 60000): Promise<Usage | { error: string }> {
+async function fetchUsage($: Engine, maxAgeMs = 60000): Promise<Usage | { error: string }> {
   const now = await $.clock.now()
   if (usageMemo && now - usageMemo.at < maxAgeMs) return usageMemo.value
   let key = ''
@@ -1915,20 +1915,20 @@ function usageShort(u: Usage): string {
 }
 
 /** The run footer's usage line, fresh after the run; a warning toast past 85%. */
-async function usageFooter($: $): Promise<string> {
+async function usageFooter($: Engine): Promise<string> {
   const u = await fetchUsage($, 0)
   if ('error' in u) return ''
   warnUsage($, u)
   return usageShort(u)
 }
 
-async function usageOverview($: $): Promise<string> {
+async function usageOverview($: Engine): Promise<string> {
   const u = await fetchUsage($)
   const label = tx('Usage', 'Kullanım')
   return 'error' in u ? `${label}: ${u.error}` : `${label}: ${usageShort(u)} · ${tx('details', 'ayrıntı')} /commandcode usage`
 }
 
-async function usageText($: $): Promise<string> {
+async function usageText($: Engine): Promise<string> {
   await config($)
   const u = await fetchUsage($, 0)
   if ('error' in u) return `${tx('Command Code usage', 'Command Code kullanım')}\n${u.error}`
@@ -1950,7 +1950,7 @@ async function usageText($: $): Promise<string> {
 
 /** Warns once per window when it passes 85%, so a delegation does not hit the wall unseen. */
 const usageWarned = new Set<string>()
-function warnUsage($: $, u: Usage): void {
+function warnUsage($: Engine, u: Usage): void {
   for (const [id, w] of [['5h', u.fiveHour], ['week', u.weekly]] as const) {
     if (!w) continue
     const key = `${id}:${w.resetAt}`
@@ -1970,7 +1970,7 @@ function warnUsage($: $, u: Usage): void {
 }
 
 /** Checks the CLI, the login and one real round trip on the configured model. */
-async function doctor($: $): Promise<string> {
+async function doctor($: Engine): Promise<string> {
   const cfg = await config($)
   const lines = ['Command Code doctor']
   const argv = await cliArgv($, cfg)
@@ -2006,7 +2006,7 @@ async function doctor($: $): Promise<string> {
   return lines.join('\n')
 }
 
-async function overview($: $): Promise<string> {
+async function overview($: Engine): Promise<string> {
   const cfg = await config($)
   const g = await grants($)
   const agents = await agentsOf($)
