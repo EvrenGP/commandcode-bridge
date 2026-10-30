@@ -1003,7 +1003,7 @@ function dropPartialLine(text: string): string {
   return cut >= 0 ? text.slice(cut + 1) : text
 }
 
-/** `$.fs.read` refuses a file over 4 MiB, so a long transcript is tailed instead. */
+/** The end of a transcript; `$.fs.read` refuses a file over 4 MiB, so a larger one reads as empty. */
 async function readTail($: Engine, path: string, maxBytes: number): Promise<string> {
   const stat = await $.fs.stat(path).catch(() => null)
   if (!stat) return ''
@@ -1011,12 +1011,8 @@ async function readTail($: Engine, path: string, maxBytes: number): Promise<stri
     const text = String(await $.fs.read(path))
     return text.length > maxBytes ? dropPartialLine(text.slice(-maxBytes)) : text
   }
-  const script =
-    'const fs=require("fs");const s=fs.openSync(process.argv[1],"r");' +
-    'const st=fs.fstatSync(s);const n=Math.min(Number(process.argv[2]),st.size);' +
-    'const b=Buffer.alloc(n);fs.readSync(s,b,0,n,st.size-n);process.stdout.write(b.toString("utf8"))'
-  const ran = await $.process.run(['node', '-e', script, path, String(maxBytes)], { timeoutMs: 60000 })
-  if (ran.exitCode === 0 && ran.stdout) return dropPartialLine(ran.stdout)
+  // Over $.fs.read's limit: too large to read here, and starting a program to
+  // tail it is not worth the plugin running one.
   return ''
 }
 
@@ -1830,7 +1826,6 @@ type Usage = {
   tokensOut: number
 }
 
-const USAGE_API = 'https://api.commandcode.ai'
 let usageMemo: { at: number; value: Usage } | null = null
 
 /** What /usage in Command Code shows, read from the same endpoints with the CLI's own key. */
@@ -1844,17 +1839,22 @@ async function fetchUsage($: Engine, maxAgeMs = 60000): Promise<Usage | { error:
     // Handled below.
   }
   if (!key) return { error: tx('Not signed in to Command Code: run `commandcode login`', 'Command Code girişi yok: terminalde `commandcode login`') }
-  const get = async (path: string): Promise<any> => {
-    const res = await $.http.fetch(`${USAGE_API}${path}`, { headers: { Authorization: `Bearer ${key}` } })
+  const headers = { Authorization: `Bearer ${key}` }
+  const check = (path: string, res: { status: number; ok: boolean; text: string }): any => {
     if (res.status === 401 || res.status === 403) throw new Error('auth')
     if (!res.ok) throw new Error(`${path} ${res.status}`)
     return JSON.parse(res.text)
   }
   try {
+    // Each address is written out in full: these three, on Command Code's API, are the only requests the plugin makes.
     const [credits, subscription, summary] = await Promise.all([
-      get('/alpha/billing/credits'),
-      get('/alpha/billing/subscriptions').catch(() => null),
-      get('/alpha/usage/summary').catch(() => null),
+      $.http.fetch('https://api.commandcode.ai/alpha/billing/credits', { headers }).then((res) => check('credits', res)),
+      $.http.fetch('https://api.commandcode.ai/alpha/billing/subscriptions', { headers })
+        .then((res) => check('subscriptions', res))
+        .catch(() => null),
+      $.http.fetch('https://api.commandcode.ai/alpha/usage/summary', { headers })
+        .then((res) => check('summary', res))
+        .catch(() => null),
     ])
     const windowOf = (raw: any): Window | null =>
       raw && typeof raw.cap === 'number'

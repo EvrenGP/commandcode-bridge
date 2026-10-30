@@ -1,6 +1,14 @@
 {
   "name": "commandcode-bridge",
-  "version": "0.5.1",
-  "description": "Runs Command Code agents (your Command Code subscription) as subagents: shares the conversation with them, reads their transcripts back, with permission tiers, a result cache, and a handoff that continues the whole conversation in Command Code when Claude's quota runs out",
-  "author": { "name": "Evren" }
+  "displayName": "Command Code Bridge",
+  "version": "0.5.2",
+  "description": "Use your Command Code subscription (DeepSeek, Kimi, GLM, Qwen and more) from Claude Code: delegate tasks to cheaper models as subagents, route turns, hand off a conversation, and watch your credit limits.",
+  "author": { "name": "EvrenGP", "url": "https://github.com/EvrenGP" },
+  "license": "MIT",
+  "keywords": ["command-code", "deepseek", "subagents", "delegation", "token-saving", "routing", "usage"],
+  "homepage": "https://github.com/EvrenGP/commandcode-bridge",
+  "repository": "https://github.com/EvrenGP/commandcode-bridge",
+  "documentationUrl": "https://github.com/EvrenGP/commandcode-bridge#readme",
+  "supportUrl": "https://github.com/EvrenGP/commandcode-bridge/issues",
+  "privacyPolicyUrl": "https://github.com/EvrenGP/commandcode-bridge/blob/main/PRIVACY.md"
 }
