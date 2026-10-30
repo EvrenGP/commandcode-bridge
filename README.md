@@ -9,7 +9,7 @@ Claude stays the lead. Bulk reading, audits and mechanical edits go to cheaper C
 - **Handoff:** writes the whole conversation as a native Command Code session you can continue with `commandcode --session <file>`.
 - **Usage:** shows your 5-hour, weekly and monthly credits, and warns before a window runs out.
 
-The interface text is in Turkish; commands, tool names and settings are in English.
+The interface speaks English and Turkish. It follows your system language by default; change it with `/commandcode set lang en` (or `tr`, or `auto`).
 
 ## Requirements
 
@@ -100,7 +100,7 @@ A model can be picked by its list number, its full id, the part after the slash 
 
 ## Settings
 
-`/commandcode set <key> <value>`: `cliPath`, `model`, `cacheTtlMin`, `maxContextChars`, `recentMessages`, `maxTurns`, `handoffThinking`, `warnAtPercent`, `route`, `routeModel`, `routeMode`.
+`/commandcode set <key> <value>`: `cliPath`, `model`, `cacheTtlMin`, `maxContextChars`, `recentMessages`, `maxTurns`, `handoffThinking`, `warnAtPercent`, `route`, `routeModel`, `routeMode`, `lang` (`auto`, `en`, `tr`).
 
 If the CLI is not found, set `cliPath` to the CLI's `index.mjs` or executable name.
 

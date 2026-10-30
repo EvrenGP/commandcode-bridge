@@ -50,6 +50,8 @@ type Config = {
   routeModel: string
   /** Tier a routed turn runs in: read, edit or full. */
   routeMode: string
+  /** Interface language: en, tr, or auto (from the system locale). */
+  lang: string
 }
 
 const DEFAULTS: Config = {
@@ -64,6 +66,25 @@ const DEFAULTS: Config = {
   route: false,
   routeModel: '',
   routeMode: 'edit',
+  lang: 'auto',
+}
+
+// --- language -------------------------------------------------------------
+
+type Lang = 'en' | 'tr'
+let lang: Lang = 'en'
+
+function systemLang(): Lang {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().locale.toLowerCase().startsWith('tr') ? 'tr' : 'en'
+  } catch {
+    return 'en'
+  }
+}
+
+/** The interface text in the current language; every config() read refreshes it. */
+function tx(en: string, tr: string): string {
+  return lang === 'tr' ? tr : en
 }
 
 // The subscription's catalogue, copied from commandcode.ai/docs
@@ -215,9 +236,12 @@ function modelsText(current: { model: string; routeModel: string } = { model: ''
   const mark = (id: string) =>
     [id === current.model ? 'run' : '', id === current.routeModel ? 'route' : ''].filter(Boolean).join('+')
   const header = [
-    `Command Code modelleri · ${modelCount()} · abonelik kataloğu (commandcode.ai/docs)`,
-    `Şu an: run ${current.model || 'CLI varsayılanı'} · route ${current.routeModel || current.model || 'CLI varsayılanı'}`,
-    'Seçmek için numara, id ya da adın bir parçası: /commandcode model 6 (run aracı) · /commandcode route model kimi-k3 (yönlendirme)',
+    `${tx('Command Code models', 'Command Code modelleri')} · ${modelCount()} · ${tx('subscription catalogue', 'abonelik kataloğu')} (commandcode.ai/docs)`,
+    `${tx('Now', 'Şu an')}: run ${current.model || tx('CLI default', 'CLI varsayılanı')} · route ${current.routeModel || current.model || tx('CLI default', 'CLI varsayılanı')}`,
+    tx(
+      'Pick by number, id or part of the name: /commandcode model 6 (run tool) · /commandcode route model kimi-k3 (routing)',
+      'Seçmek için numara, id ya da adın bir parçası: /commandcode model 6 (run aracı) · /commandcode route model kimi-k3 (yönlendirme)',
+    ),
   ].join('\n')
   return [
     header,
@@ -240,7 +264,7 @@ function resolveModel(input: string): { id: string } | { error: string } {
   const raw = input.trim()
   if (/^\d+$/.test(raw)) {
     const picked = all[Number(raw) - 1]
-    return picked ? { id: picked.id } : { error: `${raw} numaralı model yok (1-${all.length}). Liste: /commandcode models` }
+    return picked ? { id: picked.id } : { error: tx(`No model number ${raw} (1-${all.length}). List: /commandcode models`, `${raw} numaralı model yok (1-${all.length}). Liste: /commandcode models`) }
   }
   const needle = raw.toLowerCase()
   const exact = all.find((model) =>
@@ -249,50 +273,26 @@ function resolveModel(input: string): { id: string } | { error: string } {
   if (exact) return { id: exact.id }
   const matches = all.filter((model) => `${model.id} ${model.name}`.toLowerCase().includes(needle))
   if (matches.length === 1) return { id: matches[0]!.id }
-  if (matches.length === 0) return { error: `"${raw}" ile eşleşen model yok. Liste: /commandcode models` }
+  if (matches.length === 0) return { error: tx(`No model matches "${raw}". List: /commandcode models`, `"${raw}" ile eşleşen model yok. Liste: /commandcode models`) }
   return {
-    error: `"${raw}" birden çok modele uyuyor, numarayla seç:\n${matches
+    error: `${tx(`"${raw}" matches several models, pick by number:`, `"${raw}" birden çok modele uyuyor, numarayla seç:`)}\n${matches
       .slice(0, 12)
       .map((model) => `${String(all.indexOf(model) + 1).padStart(3)}. ${model.id} · ${model.name}`)
       .join('\n')}`,
   }
 }
 
-// --- the model picker -----------------------------------------------------
+type CatalogueModel = { id: string; name: string; context: string; plan: string; provider: string }
 
-const PICKER = 'cc-models'
-const pickerState = { filter: '', value: '' }
-
-type PickerModel = { id: string; name: string; context: string; plan: string; provider: string }
-
-function allModels(): PickerModel[] {
+function allModels(): CatalogueModel[] {
   return MODEL_CATALOGUE.flatMap((group) =>
     group.models.map(([id, name, context, plan]) => ({ id, name, context, plan, provider: group.provider })),
   )
 }
 
-function pickerModels(): PickerModel[] {
-  const needle = pickerState.filter.trim().toLowerCase()
-  const all = allModels()
-  if (!needle) return all
-  return all.filter((model) => `${model.id} ${model.name} ${model.provider}`.toLowerCase().includes(needle))
-}
-
 async function setConfigOf($: $, patch: Partial<Config>): Promise<void> {
   const stored = ((await $.store.get('config')) ?? {}) as Partial<Config>
   await $.store.set('config', { ...stored, ...patch })
-}
-
-async function chooseModel($: $, id: string): Promise<void> {
-  if (!id || id === 'none') return
-  await setConfigOf($, { routeModel: id })
-  pickerState.value = id
-  try {
-    await $.ui.close({ id: PICKER })
-  } catch {
-    // Already closed.
-  }
-  $.ui.toast(`Command Code modeli: ${id}`, { timeoutMs: 4000 })
 }
 
 type AgentRecord = { sessionId: string; model: string; updatedAt: number; runs: number }
@@ -396,7 +396,9 @@ function cleanText(text: string): string {
 
 async function config($: $): Promise<Config> {
   const stored = ((await $.store.get('config')) ?? {}) as Partial<Config>
-  return { ...DEFAULTS, ...stored }
+  const cfg = { ...DEFAULTS, ...stored }
+  lang = cfg.lang === 'tr' || cfg.lang === 'en' ? cfg.lang : systemLang()
+  return cfg
 }
 
 async function projectKey($: $): Promise<string> {
@@ -456,17 +458,17 @@ async function setGrant($: $, mode: 'edit' | 'full', value: boolean): Promise<vo
 async function permit($: $, mode: Mode, summary: string): Promise<{ ok: true } | { ok: false; reason: string }> {
   if (mode === 'read') return { ok: true }
   if ((await grants($))[mode]) return { ok: true }
-  const ONCE = 'Bu sefer izin ver'
-  const ALWAYS = 'Bu projede hep izin ver'
-  const DENY = 'Reddet'
+  const ONCE = tx('Allow this time', 'Bu sefer izin ver')
+  const ALWAYS = tx('Always allow in this project', 'Bu projede hep izin ver')
+  const DENY = tx('Deny', 'Reddet')
   const what =
     mode === 'edit'
-      ? 'dosyaları düzenleyebilir (kabuk komutları bu katmanda kapalı)'
-      : 'her aracı onaysız kullanabilir (komut çalıştırma dahil)'
+      ? tx('may edit files (shell commands stay closed in this tier)', 'dosyaları düzenleyebilir (kabuk komutları bu katmanda kapalı)')
+      : tx('may use every tool without asking (running commands included)', 'her aracı onaysız kullanabilir (komut çalıştırma dahil)')
   let answer: string
   try {
-    answer = await $.ui.ask(`Command Code ajanı bu projede ${what}. Görev: ${summary}`, {
-      header: mode === 'edit' ? 'Düzenleme' : 'Tam yetki',
+    answer = await $.ui.ask(tx(`A Command Code agent ${what} in this project. Task: ${summary}`, `Command Code ajanı bu projede ${what}. Görev: ${summary}`), {
+      header: mode === 'edit' ? tx('Edit', 'Düzenleme') : tx('Full access', 'Tam yetki'),
       options: [ONCE, ALWAYS, DENY],
     })
   } catch {
@@ -503,7 +505,7 @@ async function buildContext(
   let picked = scope === 'full' ? messages : messages.slice(-cfg.recentMessages)
   if (omitLastUser) {
     const last = picked.length - 1
-    if (last >= 0 && picked[last].role === 'user') picked = picked.slice(0, last)
+    if (last >= 0 && picked[last]!.role === 'user') picked = picked.slice(0, last)
   }
   if (picked.length === 0) return null
   const lines: string[] = []
@@ -606,7 +608,7 @@ async function runCommandCode(
   let buffer = ''
   let turn = 0
   const status = (what: string) => $.ui.status(`Command Code · ${args.label} · ${what}`)
-  status('başlıyor')
+  status(tx('starting', 'başlıyor'))
 
   const usage = (source: any) => {
     if (!source) return
@@ -626,7 +628,7 @@ async function runCommandCode(
       if (ev.type === 'run_start' && ev.sessionId) out.sessionId = ev.sessionId
       else if (ev.type === 'turn_start') {
         turn = ev.turnNumber ?? turn + 1
-        status(`tur ${turn}`)
+        status(`${tx('turn', 'tur')} ${turn}`)
       } else if (ev.type === 'model_request_start' && ev.model) out.model = ev.model
       else if (ev.type === 'model_request_end') usage(ev.usage)
       else if (ev.type === 'run_error') out.error = ev.error?.message ?? String(ev.error ?? 'run error')
@@ -638,7 +640,7 @@ async function runCommandCode(
         usage(result.usage)
       } else if (typeof ev.type === 'string' && /tool/.test(ev.type)) {
         const name = ev.toolName ?? ev.name ?? ev.tool?.name
-        if (name) status(`tur ${turn} · ${name}`)
+        if (name) status(`${tx('turn', 'tur')} ${turn} · ${name}`)
       }
     } else if (row.type === 'result') {
       if (typeof row.finalText === 'string' && row.finalText) out.text = row.finalText
@@ -696,9 +698,17 @@ function isAuthError(error: string): boolean {
 /** The error as the person can act on it. */
 function explainError(error: string): string {
   if (isAuthError(error)) {
-    return `Command Code API anahtarı geçersiz ya da süresi dolmuş (${oneLine(error, 160)}). Terminalde önce \`commandcode logout\`, sonra \`commandcode login\` çalıştır (yalnız login eski anahtarı tutar), sonra tekrar dene; durum için /commandcode doctor.`
+    return tx(
+      `The Command Code API key is invalid or expired (${oneLine(error, 160)}). In a terminal run \`commandcode logout\`, then \`commandcode login\` (login alone keeps the old key), then try again; check with /commandcode doctor.`,
+      `Command Code API anahtarı geçersiz ya da süresi dolmuş (${oneLine(error, 160)}). Terminalde önce \`commandcode logout\`, sonra \`commandcode login\` çalıştır (yalnız login eski anahtarı tutar), sonra tekrar dene; durum için /commandcode doctor.`,
+    )
   }
-  if (/no response/i.test(error)) return `Model boş yanıt döndü, tekrar da boş kaldı (${oneLine(error, 120)}). Başka model dene: /commandcode models.`
+  if (/no response/i.test(error)) {
+    return tx(
+      `The model gave an empty reply, twice (${oneLine(error, 120)}). Try another model: /commandcode models.`,
+      `Model boş yanıt döndü, tekrar da boş kaldı (${oneLine(error, 120)}). Başka model dene: /commandcode models.`,
+    )
+  }
   return error
 }
 
@@ -781,8 +791,8 @@ async function* streamRoute(
   let buffer = ''
   let turn = 0
   let sawText = false
-  const status = (what: string) => $.ui.status(`Command Code · tur ${turn || 1} · ${what}`)
-  status('başlıyor')
+  const status = (what: string) => $.ui.status(`Command Code · ${tx('turn', 'tur')} ${turn || 1} · ${what}`)
+  status(tx('starting', 'başlıyor'))
 
   const handle = (line: string): string[] => {
     let row: any
@@ -796,10 +806,10 @@ async function* streamRoute(
       if (ev.type === 'run_start' && ev.sessionId) out.sessionId = ev.sessionId
       else if (ev.type === 'turn_start') {
         turn = ev.turnNumber ?? turn + 1
-        status('düşünüyor')
+        status(tx('thinking', 'düşünüyor'))
       } else if (ev.type === 'model_request_start') {
         if (ev.model) out.model = ev.model
-        status('yanıtlıyor')
+        status(tx('answering', 'yanıtlıyor'))
       } else if (ev.type === 'text_delta' && typeof ev.delta === 'string' && ev.delta) {
         sawText = true
         out.text += ev.delta
@@ -919,7 +929,7 @@ function frontmatter(raw: string): Record<string, string> {
   const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(raw)
   if (!match) return {}
   const out: Record<string, string> = {}
-  for (const line of match[1].split(/\r?\n/)) {
+  for (const line of match[1]!.split(/\r?\n/)) {
     const at = line.indexOf(':')
     if (at < 1) continue
     const key = line.slice(0, at).trim()
@@ -1040,7 +1050,7 @@ function renderTranscript(raw: string, last: number): string {
     }
     if (parts.length) out.push(`## ${role}\n${parts.join('\n')}`)
   }
-  return out.slice(-last).join('\n\n') || '(transcript içinde mesaj bulunamadı)'
+  return out.slice(-last).join('\n\n') || tx('(no messages in the transcript)', '(transcript içinde mesaj bulunamadı)')
 }
 
 // --- handing the conversation over ----------------------------------------
@@ -1115,7 +1125,7 @@ async function buildHandoff($: $, cfg: Config, note: string): Promise<Handoff> {
 
   let usable = messages.filter((message) => ccBlocks(message.content ?? [], cfg.handoffThinking).length > 0)
   // A Command Code transcript opens on a user message.
-  while (usable.length && usable[0].role !== 'user') usable = usable.slice(1)
+  while (usable.length && usable[0]!.role !== 'user') usable = usable.slice(1)
   if (!usable.length) {
     push('user', [{ type: 'text', text: note.trim() || 'Continuing this conversation in Command Code.' }])
   }
@@ -1149,9 +1159,9 @@ async function buildHandoff($: $, cfg: Config, note: string): Promise<Handoff> {
 export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
+    await config($) // sets the interface language before anything is shown
     await $.tool.register({
       name: 'run',
-      isDeferred: false,
       description:
         "Delegate a task to a Command Code agent (the user's Command Code subscription, its own models such as DeepSeek, Kimi, GLM, Qwen) as a subagent. " +
         'Use it when the user asks for Command Code, for a second opinion from another model, or to offload a self-contained task to save Claude tokens: ' +
@@ -1250,16 +1260,16 @@ export const register: Register = (on) => {
     const runId = `${now.toString(36)}-${hash(task).slice(0, 4)}`
 
     const refuse = async function* (reason: string) {
-      const text = `Command Code bu turu yanıtlayamadı: ${reason}`
-      yield { kind: 'text', index: 0, text }
-      yield { kind: 'stop', stopReason: 'end_turn' as const, usage: null }
+      const text = `${tx('Command Code could not answer this turn', 'Command Code bu turu yanıtlayamadı')}: ${reason}`
+      yield { kind: 'text' as const, index: 0, text }
+      yield { kind: 'stop' as const, stopReason: 'end_turn' as const, usage: null }
       return { turnId: e.turnId, index: e.index, answer: text, toolUses: [], stopReason: 'end_turn' as const, usage: null }
     }
 
     const allowed = await permit($, mode, oneLine(task, 140))
     if (!allowed.ok) return yield* refuse(allowed.reason)
     if (mode === 'edit' && !(await $.fs.exists(await guardPath($)))) {
-      return yield* refuse(`edit katmanının koruma modu bulunamadı: ${await guardPath($)}`)
+      return yield* refuse(`${tx("the edit tier's guard mod is missing", 'edit katmanının koruma modu bulunamadı')}: ${await guardPath($)}`)
     }
 
     const known = await routeOf($, claudeSession)
@@ -1276,7 +1286,7 @@ export const register: Register = (on) => {
       stderr: '',
     }
 
-    $.ui.status(`Command Code · ${model || 'varsayılan model'} · ${mode}`)
+    $.ui.status(`Command Code · ${model || tx('default model', 'varsayılan model')} · ${mode}`)
     for (let attempt = 0; attempt < 2; attempt++) {
       if (attempt > 0) {
         // Nothing was shown yet, so the second try starts clean.
@@ -1290,15 +1300,15 @@ export const register: Register = (on) => {
         next.signal,
         out,
       )) {
-        yield { kind: 'text', index: 0, text: delta }
+        yield { kind: 'text' as const, index: 0, text: delta }
       }
     }
     if (!out.text && !out.error && !out.cancelled) out.error = 'The model produced no response.'
 
     if (out.error) {
-      const text = `\n\n[Command Code hatası: ${explainError(out.error)}${out.text ? '' : ` · görev: ${oneLine(task, 80)}`}]`
+      const text = `\n\n[${tx('Command Code error', 'Command Code hatası')}: ${explainError(out.error)}${out.text ? '' : ` · ${tx('task', 'görev')}: ${oneLine(task, 80)}`}]`
       out.text += text
-      yield { kind: 'text', index: 0, text }
+      yield { kind: 'text' as const, index: 0, text }
     }
     if (out.sessionId && !out.cancelled) {
       await saveRoute($, claudeSession, { sessionId: out.sessionId, model: out.model || model, updatedAt: now })
@@ -1320,7 +1330,7 @@ export const register: Register = (on) => {
 
     const stopReason = out.cancelled ? null : 'end_turn'
     const usage = turnUsageOf(out)
-    yield { kind: 'stop', stopReason, usage }
+    yield { kind: 'stop' as const, stopReason, usage }
     return { turnId: e.turnId, index: e.index, answer: out.text, toolUses: [], stopReason, usage }
   })
 
@@ -1410,7 +1420,7 @@ export const register: Register = (on) => {
           outputTokens: 0,
           preview: hit.text.slice(0, 160),
         })
-        return { result: `${hit.text}\n\n---\n${hit.meta} · cache'ten (${Math.round((now - hit.at) / 1000)} sn önce)` }
+        return { result: `${hit.text}\n\n---\n${hit.meta} · ${tx(`cached (${Math.round((now - hit.at) / 1000)} s ago)`, `cache'ten (${Math.round((now - hit.at) / 1000)} sn önce)`)}` }
       }
     }
 
@@ -1460,9 +1470,9 @@ export const register: Register = (on) => {
     const transcriptPath = outcome.sessionId ? await findTranscript($, outcome.sessionId) : null
     const meta = [
       `Command Code${profile ? ` ${profile.name}` : ''}${agentName ? ` agent "${agentName}"` : ''}`,
-      outcome.model || model || 'varsayılan model',
+      outcome.model || model || tx('default model', 'varsayılan model'),
       mode,
-      `${Math.round(durationMs / 1000)} sn`,
+      `${Math.round(durationMs / 1000)} ${tx('s', 'sn')}`,
       `${outcome.inputTokens} in / ${outcome.outputTokens} out token`,
       outcome.sessionId ? `session ${outcome.sessionId}` : '',
       transcriptPath ? `transcript ${transcriptPath}` : '',
@@ -1470,15 +1480,15 @@ export const register: Register = (on) => {
     ]
       .filter(Boolean)
       .join(' · ')
-    if (outcome.cancelled) return { result: `İptal edildi.\n\n---\n${meta}`, isError: true }
+    if (outcome.cancelled) return { result: `${tx('Cancelled.', 'İptal edildi.')}\n\n---\n${meta}`, isError: true }
     if (outcome.error) {
       const hint = isAuthError(outcome.error) ? ' Do not retry: the user has to log in again first.' : ''
-      return { result: `Command Code başarısız: ${explainError(outcome.error)}${hint}\n\n---\n${meta}`, isError: true }
+      return { result: `${tx('Command Code failed', 'Command Code başarısız')}: ${explainError(outcome.error)}${hint}\n\n---\n${meta}`, isError: true }
     }
     const blocked = outcome.blocked.length
-      ? `\n\nEngellenen araçlar: ${[...new Set(outcome.blocked)].join(', ')} (${mode} katmanı).`
+      ? `\n\n${tx('Blocked tools', 'Engellenen araçlar')}: ${[...new Set(outcome.blocked)].join(', ')} (${mode} ${tx('tier', 'katmanı')}).`
       : ''
-    const text = clip(outcome.text || '(son metin yok)', MAX_RESULT)
+    const text = clip(outcome.text || tx('(no final text)', '(son metin yok)'), MAX_RESULT)
     if (cacheable) await cachePut($, cacheKey, { at: now, text, meta }, cfg.cacheTtlMin)
     return { result: `${text}${blocked}\n\n---\n${meta}` }
   })
@@ -1491,11 +1501,11 @@ export const register: Register = (on) => {
       const runs = ((await $.store.get('runs')) ?? []) as RunRecord[]
       sessionId = [...runs].reverse().find((run) => run.sessionId)?.sessionId ?? ''
     }
-    if (!sessionId) return { result: 'Henüz okunacak bir Command Code oturumu yok.', isError: true }
+    if (!sessionId) return { result: tx('No Command Code session to read yet.', 'Henüz okunacak bir Command Code oturumu yok.'), isError: true }
     const path = await findTranscript($, sessionId)
-    if (!path) return { result: `Oturum ${sessionId} için transcript bulunamadı.`, isError: true }
+    if (!path) return { result: tx(`No transcript found for session ${sessionId}.`, `Oturum ${sessionId} için transcript bulunamadı.`), isError: true }
     const raw = await readTail($, path, 600000)
-    if (!raw) return { result: `Transcript okunamadı: ${path}`, isError: true }
+    if (!raw) return { result: `${tx('Could not read the transcript', 'Transcript okunamadı')}: ${path}`, isError: true }
     return { result: `Transcript ${path}\n\n${clip(renderTranscript(raw, Math.max(1, input.last ?? 30)), MAX_RESULT)}` }
   })
 
@@ -1503,7 +1513,7 @@ export const register: Register = (on) => {
     const input = e as unknown as { reset?: string }
     if (input.reset) {
       await saveAgent($, input.reset, null)
-      return { result: `Agent "${input.reset}" sıfırlandı; sonraki çalışması yeni bir Command Code oturumu açar.` }
+      return { result: tx(`Agent "${input.reset}" reset; its next run opens a new Command Code session.`, `Agent "${input.reset}" sıfırlandı; sonraki çalışması yeni bir Command Code oturumu açar.`) }
     }
     return { result: await overview($) }
   })
@@ -1523,66 +1533,11 @@ export const register: Register = (on) => {
     const handoff = await buildHandoff($, effective, input.note ?? '')
     return {
       result: [
-        `Sohbet Command Code oturumuna yazıldı: ${handoff.messages} mesaj.`,
-        `Oturum: ${handoff.sessionId}`,
-        `Dosya: ${handoff.path}`,
-        `Devam etmek için: ${handoff.command}`,
+        tx(`Conversation written as a Command Code session: ${handoff.messages} messages.`, `Sohbet Command Code oturumuna yazıldı: ${handoff.messages} mesaj.`),
+        `${tx('Session', 'Oturum')}: ${handoff.sessionId}`,
+        `${tx('File', 'Dosya')}: ${handoff.path}`,
+        `${tx('To continue', 'Devam etmek için')}: ${handoff.command}`,
       ].join('\n'),
-    }
-  })
-
-  // The picker: a pane with a filter field and the catalogue as a Select. A
-  // pick writes `routeModel`, which every routed turn passes as `-m`.
-  on('ui.render', { component: 'Pane' }, async ($, e, next) => {
-    const rest = await next(e)
-    if (e.requestId !== PICKER) return rest
-    const elements = $.ui.resolve(e) as any
-    const { Box, Text, Input, Select } = elements
-    if (!Input || !Select) return rest
-
-    const list = pickerModels()
-    const options = list.length
-      ? list
-          .slice(0, 200)
-          .map((model) => ({
-            value: model.id,
-            label: `${model.name} · ${model.id}${model.context ? ` · ${model.context}` : ''}`,
-          }))
-      : [{ value: 'none', label: 'Eşleşme yok' }]
-    const current = options.some((option) => option.value === pickerState.value) ? pickerState.value : options[0].value
-
-    try {
-      const children = [
-        Text({
-          dimColor: true,
-          children: [`${modelCount()} model · seçili: ${pickerState.value || 'varsayılan'} · Enter uygular · Esc kapatır`],
-        }),
-        Input({
-          key: 'filter',
-          label: 'Ara',
-          placeholder: 'glm, kimi, deepseek…',
-          value: pickerState.filter,
-          onSubmit: (value: string) => {
-            pickerState.filter = value
-            $.ui.invalidate('ui.render')
-          },
-        }),
-        Select({
-          key: 'model',
-          label: 'Model',
-          options,
-          value: current,
-          autoFocus: true,
-          onSelect: (value: string) => {
-            void chooseModel($, value)
-          },
-        }),
-      ]
-      if (rest) children.push(rest as any)
-      return Box({ flexDirection: 'column', children })
-    } catch (err) {
-      $.ui.log(`model picker failed: ${err instanceof Error ? err.message : String(err)}`, { to: 'debug' })
-      return rest
     }
   })
 
@@ -1608,13 +1563,15 @@ export const register: Register = (on) => {
     )
     if (!outcome.text) return next(e)
     return {
-      isAnswered: true,
-      text: outcome.text,
-      usage: {
-        input_tokens: outcome.inputTokens,
-        output_tokens: outcome.outputTokens,
-        cache_read_input_tokens: 0,
-        cache_creation_input_tokens: 0,
+      value: {
+        isAnswered: true as const,
+        text: outcome.text,
+        usage: {
+          input_tokens: outcome.inputTokens,
+          output_tokens: outcome.outputTokens,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+        },
       },
     }
   })
@@ -1666,7 +1623,7 @@ export const register: Register = (on) => {
     return {
       messages: [
         { role: 'user', text: `The conversation so far, compacted:\n\n${outcome.text}`, toolUses: [] },
-        { role: 'assistant', text: 'Özeti aldım; kaldığımız yerden devam ediyorum.', toolUses: [] },
+        { role: 'assistant', text: tx('Got the summary; picking up where we left off.', 'Özeti aldım; kaldığımız yerden devam ediyorum.'), toolUses: [] },
       ],
       usage: {
         input_tokens: outcome.inputTokens,
@@ -1678,6 +1635,7 @@ export const register: Register = (on) => {
   })
 
   on('command.run', { command: 'commandcode' }, async ($, e) => {
+    await config($)
     const args = String((e as unknown as { args?: string }).args ?? '').trim()
     const [verb, ...rest] = args.split(/\s+/).filter(Boolean)
     const note = rest.join(' ')
@@ -1687,13 +1645,16 @@ export const register: Register = (on) => {
     if (verb === 'continue') {
       await setSessionRoute($, await $.session.id(), true)
       let message =
-        'Command Code yönlendirmesi bu sohbet için açık: sonraki turlar aynı sohbette Command Code ile yanıtlanır, Claude kotası harcanmaz. Kapatmak için: /commandcode route off'
+        tx(
+          'Command Code routing is on for this conversation: the next turns are answered by Command Code here, without spending Claude quota. Turn off: /commandcode route off',
+          'Command Code yönlendirmesi bu sohbet için açık: sonraki turlar aynı sohbette Command Code ile yanıtlanır, Claude kotası harcanmaz. Kapatmak için: /commandcode route off',
+        )
       if (note) {
         try {
           await $.prompt.submit({ text: note })
-          message += `\nGönderildi: ${note}`
+          message += `\n${tx('Sent', 'Gönderildi')}: ${note}`
         } catch (err) {
-          message += `\nNot gönderilemedi (${err instanceof Error ? err.message : String(err)}); kendin yazabilirsin.`
+          message += `\n${tx('Could not send the note', 'Not gönderilemedi')} (${err instanceof Error ? err.message : String(err)})${tx('; type it yourself.', '; kendin yazabilirsin.')}`
         }
       }
       return { text: message }
@@ -1704,9 +1665,9 @@ export const register: Register = (on) => {
       if (!sub) {
         return {
           text: [
-            `Yönlendirme: ${await routeState($, cfg)}`,
-            `model ${cfg.routeModel || cfg.model || 'CLI varsayılanı'} · mod ${cfg.routeMode}`,
-            '/commandcode route on | off · route model <numara|id> · route mode read|edit|full',
+            `${tx('Routing', 'Yönlendirme')}: ${await routeState($, cfg)}`,
+            `model ${cfg.routeModel || cfg.model || tx('CLI default', 'CLI varsayılanı')} · mode ${cfg.routeMode}`,
+            '/commandcode route on | off · route model <n|id> · route mode read|edit|full',
           ].join('\n'),
         }
       }
@@ -1717,8 +1678,14 @@ export const register: Register = (on) => {
         return {
           text:
             sub === 'on'
-              ? 'Yönlendirme açık (tüm oturumlar): turları Command Code yanıtlar. Yalnız bu sohbet için: /commandcode continue'
-              : 'Yönlendirme kapalı (tüm oturumlar ve bu sohbet): turları Claude yanıtlar.',
+              ? tx(
+                  'Routing on (all sessions): Command Code answers the turns. This conversation only: /commandcode continue',
+                  'Yönlendirme açık (tüm oturumlar): turları Command Code yanıtlar. Yalnız bu sohbet için: /commandcode continue',
+                )
+              : tx(
+                  'Routing off (all sessions and this conversation): Claude answers the turns.',
+                  'Yönlendirme kapalı (tüm oturumlar ve bu sohbet): turları Claude yanıtlar.',
+                ),
         }
       }
       if (sub === 'model') {
@@ -1727,15 +1694,15 @@ export const register: Register = (on) => {
         const found = resolveModel(query)
         if ('error' in found) return { text: found.error }
         await setConfig({ routeModel: found.id })
-        return { text: `Yönlendirme modeli: ${found.id}` }
+        return { text: `${tx('Routing model', 'Yönlendirme modeli')}: ${found.id}` }
       }
       if (sub === 'mode') {
         const mode = rest[1]
-        if (mode !== 'read' && mode !== 'edit' && mode !== 'full') return { text: 'Mod read, edit ya da full olmalı.' }
+        if (mode !== 'read' && mode !== 'edit' && mode !== 'full') return { text: tx('Mode must be read, edit or full.', 'Mod read, edit ya da full olmalı.') }
         await setConfig({ routeMode: mode })
         return { text: `routeMode = ${mode}` }
       }
-      return { text: 'Bilinmeyen alt komut. route [on|off|model <id>|mode read|edit|full]' }
+      return { text: `${tx('Unknown subcommand', 'Bilinmeyen alt komut')}. route [on|off|model <n>|mode read|edit|full]` }
     }
     if (verb === 'models') return { text: modelsText(await config($)) }
     if (verb === 'model') {
@@ -1744,38 +1711,42 @@ export const register: Register = (on) => {
       const found = resolveModel(note)
       if ('error' in found) return { text: found.error }
       await setConfig({ model: found.id })
-      return { text: `run aracının modeli: ${found.id}${cfg.routeModel ? '' : ' (yönlendirme de bunu kullanır)'}` }
+      return {
+        text: `${tx('run tool model', 'run aracının modeli')}: ${found.id}${
+          cfg.routeModel ? '' : tx(' (routing uses it too)', ' (yönlendirme de bunu kullanır)')
+        }`,
+      }
     }
     if (verb === 'handoff') {
       const cfg = await config($)
       const handoff = await buildHandoff($, cfg, note)
       let message = [
-        `Command Code oturumu hazır · ${handoff.messages} mesaj · ${handoff.sessionId}`,
-        `Dosya: ${handoff.path}`,
-        `Komut: ${handoff.command}`,
+        `${tx('Command Code session ready', 'Command Code oturumu hazır')} · ${handoff.messages} ${tx('messages', 'mesaj')} · ${handoff.sessionId}`,
+        `${tx('File', 'Dosya')}: ${handoff.path}`,
+        `${tx('Command', 'Komut')}: ${handoff.command}`,
       ].join('\n')
-      if (note) message += `\nNot: ${note}`
+      if (note) message += `\n${tx('Note', 'Not')}: ${note}`
       return { text: message }
     }
     if (verb === 'revoke' && (rest[0] === 'edit' || rest[0] === 'full')) {
       await setGrant($, rest[0], false)
-      return { text: `Geri alındı: bu projede "${rest[0]}" yeniden sorulacak.` }
+      return { text: tx(`Revoked: "${rest[0]}" will be asked again in this project.`, `Geri alındı: bu projede "${rest[0]}" yeniden sorulacak.`) }
     }
     if (verb === 'doctor') return { text: await doctor($) }
     if (verb === 'usage') return { text: await usageText($) }
     if (verb === 'clear-cache') {
       await $.store.delete('cache')
-      return { text: 'Cache temizlendi.' }
+      return { text: tx('Cache cleared.', 'Cache temizlendi.') }
     }
     if (verb === 'set' && rest.length >= 1) {
       const key = rest[0] as keyof Config
-      if (!(key in DEFAULTS)) return { text: `Bilinmeyen ayar. Ayarlar: ${Object.keys(DEFAULTS).join(', ')}` }
+      if (!(key in DEFAULTS)) return { text: `${tx('Unknown setting. Settings', 'Bilinmeyen ayar. Ayarlar')}: ${Object.keys(DEFAULTS).join(', ')}` }
       const raw = rest.slice(1).join(' ')
       const fallback = DEFAULTS[key]
       let value: string | number | boolean
       if (typeof fallback === 'number') {
         value = Number(raw)
-        if (!Number.isFinite(value)) return { text: `${key} bir sayı bekliyor.` }
+        if (!Number.isFinite(value)) return { text: tx(`${key} expects a number.`, `${key} bir sayı bekliyor.`) }
       } else if (typeof fallback === 'boolean') {
         value = /^(1|true|yes|on|evet|açık)$/i.test(raw)
       } else if ((key === 'model' || key === 'routeModel') && raw) {
@@ -1789,7 +1760,7 @@ export const register: Register = (on) => {
       await $.store.set('config', { ...stored, [key]: value })
       return { text: `${key} = ${JSON.stringify(value)}` }
     }
-    if (verb) return { text: `Bilinmeyen alt komut: ${verb}\n${HELP}` }
+    if (verb) return { text: `${tx('Unknown subcommand', 'Bilinmeyen alt komut')}: ${verb}\n${help()}` }
     return { text: await overview($) }
   })
 
@@ -1810,7 +1781,7 @@ export const register: Register = (on) => {
         const id = await $.session.id()
         if (!warned.has(id)) {
           warned.add(id)
-          $.ui.toast(`Claude kullanımı %${Math.round(percent)} · sohbeti Command Code'da sürdürmek için /commandcode continue`, {
+          $.ui.toast(tx(`Claude usage ${Math.round(percent)}% · continue this conversation in Command Code: /commandcode continue`, `Claude kullanımı %${Math.round(percent)} · sohbeti Command Code'da sürdürmek için /commandcode continue`), {
             timeoutMs: 12000,
           })
         }
@@ -1826,13 +1797,23 @@ const ROUTE_KEYS = ['route', 'routeModel', 'routeMode', 'model']
 
 /** One wording for routing everywhere: what answers this conversation, and why. */
 async function routeState($: $, cfg: Config): Promise<string> {
-  if (cfg.route) return 'açık (tüm oturumlar, route on)'
-  if (await sessionRouteOn($, await $.session.id())) return 'açık (yalnız bu sohbet, /commandcode continue)'
-  return 'kapalı (turları Claude yanıtlar) · aç: /commandcode continue (bu sohbet) ya da route on (tümü)'
+  if (cfg.route) return tx('on (all sessions, route on)', 'açık (tüm oturumlar, route on)')
+  if (await sessionRouteOn($, await $.session.id())) {
+    return tx('on (this conversation only, /commandcode continue)', 'açık (yalnız bu sohbet, /commandcode continue)')
+  }
+  return tx(
+    'off (Claude answers) · turn on: /commandcode continue (this conversation) or route on (all)',
+    'kapalı (turları Claude yanıtlar) · aç: /commandcode continue (bu sohbet) ya da route on (tümü)',
+  )
 }
 
-const HELP =
-  'Komutlar: /commandcode continue [not] | route on|off|model <n>|mode read|edit|full | models | model <n> | usage | doctor | handoff [not] | agents | revoke edit|full | clear-cache | set <key> <value>'
+function help(): string {
+  return `${tx('Commands', 'Komutlar')}: /commandcode continue [note] | route on|off|model <n>|mode read|edit|full | models | model <n> | usage | doctor | handoff [note] | agents | revoke edit|full | clear-cache | set <key> <value>`
+}
+
+function locale(): string {
+  return lang === 'tr' ? 'tr-TR' : 'en-US'
+}
 
 // --- usage: the subscription's credits and window limits --------------------
 
@@ -1862,7 +1843,7 @@ async function fetchUsage($: $, maxAgeMs = 60000): Promise<Usage | { error: stri
   } catch {
     // Handled below.
   }
-  if (!key) return { error: 'Command Code girişi yok: terminalde `commandcode login`' }
+  if (!key) return { error: tx('Not signed in to Command Code: run `commandcode login`', 'Command Code girişi yok: terminalde `commandcode login`') }
   const get = async (path: string): Promise<any> => {
     const res = await $.http.fetch(`${USAGE_API}${path}`, { headers: { Authorization: `Bearer ${key}` } })
     if (res.status === 401 || res.status === 403) throw new Error('auth')
@@ -1895,7 +1876,7 @@ async function fetchUsage($: $, maxAgeMs = 60000): Promise<Usage | { error: stri
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     if (message === 'auth') return { error: explainError('401 API key expired') }
-    return { error: `Kullanım okunamadı: ${message}` }
+    return { error: `${tx('Could not read usage', 'Kullanım okunamadı')}: ${message}` }
   }
 }
 
@@ -1905,9 +1886,9 @@ function percentOf(w: Window | null): number {
 
 function resetIn(at: number, now: number): string {
   const minutes = Math.max(0, Math.round((at - now) / 60000))
-  if (minutes < 60) return `${minutes} dk`
+  if (minutes < 60) return `${minutes} ${tx('min', 'dk')}`
   const hours = Math.round(minutes / 60)
-  return hours < 48 ? `${hours} sa` : `${Math.round(hours / 24)} gün`
+  return hours < 48 ? `${hours} ${tx('h', 'sa')}` : `${Math.round(hours / 24)} ${tx('days', 'gün')}`
 }
 
 function bar(w: Window | null): string {
@@ -1916,17 +1897,21 @@ function bar(w: Window | null): string {
 }
 
 function windowLine(label: string, w: Window | null, now: number): string {
-  if (!w) return `${label}: limit yok`
+  if (!w) return `${label}: ${tx('no limit', 'limit yok')}`
   const left = Math.max(0, w.cap - w.used)
-  return `${label} ${bar(w)} %${percentOf(w)} · kalan ${left.toFixed(2)}/${w.cap} kredi · sıfırlanma ${resetIn(w.resetAt, now)}${
-    w.exceeded ? ' · DOLDU' : ''
-  }`
+  return `${label} ${bar(w)} ${percentOf(w)}% · ${tx('left', 'kalan')} ${left.toFixed(2)}/${w.cap} ${tx('credits', 'kredi')} · ${tx(
+    'resets in',
+    'sıfırlanma',
+  )} ${resetIn(w.resetAt, now)}${w.exceeded ? tx(' · USED UP', ' · DOLDU') : ''}`
 }
 
 /** One line for a run's footer. */
 function usageShort(u: Usage): string {
   const left = (w: Window | null) => (w ? `${Math.max(0, w.cap - w.used).toFixed(2)}/${w.cap}` : '-')
-  return `CC kalan: 5 saat ${left(u.fiveHour)} · hafta ${left(u.weekly)} · ay ${u.monthly.toFixed(2)} kredi`
+  return tx(
+    `CC left: 5 hours ${left(u.fiveHour)} · week ${left(u.weekly)} · month ${u.monthly.toFixed(2)} credits`,
+    `CC kalan: 5 saat ${left(u.fiveHour)} · hafta ${left(u.weekly)} · ay ${u.monthly.toFixed(2)} kredi`,
+  )
 }
 
 /** The run footer's usage line, fresh after the run; a warning toast past 85%. */
@@ -1939,33 +1924,47 @@ async function usageFooter($: $): Promise<string> {
 
 async function usageOverview($: $): Promise<string> {
   const u = await fetchUsage($)
-  return 'error' in u ? `Kullanım: ${u.error}` : `Kullanım: ${usageShort(u)} · ayrıntı /commandcode usage`
+  const label = tx('Usage', 'Kullanım')
+  return 'error' in u ? `${label}: ${u.error}` : `${label}: ${usageShort(u)} · ${tx('details', 'ayrıntı')} /commandcode usage`
 }
 
 async function usageText($: $): Promise<string> {
+  await config($)
   const u = await fetchUsage($, 0)
-  if ('error' in u) return `Command Code kullanım\n${u.error}`
+  if ('error' in u) return `${tx('Command Code usage', 'Command Code kullanım')}\n${u.error}`
   const now = await $.clock.now()
   return [
-    `Command Code kullanım · plan ${u.plan}${u.periodEnd ? ` · dönem sonu ${new Date(u.periodEnd).toLocaleDateString('tr-TR')}` : ''}`,
-    windowLine('5 saat', u.fiveHour, now),
-    windowLine('Hafta ', u.weekly, now),
-    `Aylık kalan ${u.monthly.toFixed(2)} kredi${u.purchased ? ` · satın alınan ${u.purchased.toFixed(2)}` : ''}`,
-    `Bu dönem: ${u.requests} istek · ${(u.tokensIn / 1e6).toFixed(1)}M in / ${(u.tokensOut / 1e3).toFixed(0)}K out token`,
+    `${tx('Command Code usage', 'Command Code kullanım')} · plan ${u.plan}${
+      u.periodEnd ? ` · ${tx('period ends', 'dönem sonu')} ${new Date(u.periodEnd).toLocaleDateString(locale())}` : ''
+    }`,
+    windowLine(tx('5 hours', '5 saat'), u.fiveHour, now),
+    windowLine(tx('Week   ', 'Hafta '), u.weekly, now),
+    `${tx('Monthly left', 'Aylık kalan')} ${u.monthly.toFixed(2)} ${tx('credits', 'kredi')}${
+      u.purchased ? ` · ${tx('purchased', 'satın alınan')} ${u.purchased.toFixed(2)}` : ''
+    }`,
+    `${tx('This period', 'Bu dönem')}: ${u.requests} ${tx('requests', 'istek')} · ${(u.tokensIn / 1e6).toFixed(1)}M in / ${(
+      u.tokensOut / 1e3
+    ).toFixed(0)}K out token`,
   ].join('\n')
 }
 
 /** Warns once per window when it passes 85%, so a delegation does not hit the wall unseen. */
 const usageWarned = new Set<string>()
 function warnUsage($: $, u: Usage): void {
-  for (const [label, w] of [['5 saatlik', u.fiveHour], ['haftalık', u.weekly]] as const) {
+  for (const [id, w] of [['5h', u.fiveHour], ['week', u.weekly]] as const) {
     if (!w) continue
-    const key = `${label}:${w.resetAt}`
+    const key = `${id}:${w.resetAt}`
     if ((w.exceeded || percentOf(w) >= 85) && !usageWarned.has(key)) {
       usageWarned.add(key)
-      $.ui.toast(`Command Code ${label} limit %${percentOf(w)} dolu · kalan ${Math.max(0, w.cap - w.used).toFixed(2)} kredi`, {
-        timeoutMs: 8000,
-      })
+      const label = id === '5h' ? tx('5-hour', '5 saatlik') : tx('weekly', 'haftalık')
+      const left = Math.max(0, w.cap - w.used).toFixed(2)
+      $.ui.toast(
+        tx(
+          `Command Code ${label} limit ${percentOf(w)}% used · ${left} credits left`,
+          `Command Code ${label} limit %${percentOf(w)} dolu · kalan ${left} kredi`,
+        ),
+        { timeoutMs: 8000 },
+      )
     }
   }
 }
@@ -1976,14 +1975,19 @@ async function doctor($: $): Promise<string> {
   const lines = ['Command Code doctor']
   const argv = await cliArgv($, cfg)
   lines.push(`CLI: ${argv.join(' ')}`)
+  const signedIn = tx('Login', 'Giriş')
   try {
     const auth = JSON.parse(String(await $.fs.read(join(await ccHome($), 'auth.json')))) as {
       userName?: string
       authenticatedAt?: string
     }
-    lines.push(`Giriş: ${auth.userName ?? '?'} · ${auth.authenticatedAt ? new Date(auth.authenticatedAt).toLocaleString('tr-TR') : 'tarih yok'}`)
+    lines.push(
+      `${signedIn}: ${auth.userName ?? '?'} · ${
+        auth.authenticatedAt ? new Date(auth.authenticatedAt).toLocaleString(locale()) : tx('no date', 'tarih yok')
+      }`,
+    )
   } catch {
-    lines.push('Giriş: ~/.commandcode/auth.json yok; terminalde `commandcode login`')
+    lines.push(`${signedIn}: ${tx('no ~/.commandcode/auth.json; run `commandcode login`', '~/.commandcode/auth.json yok; terminalde `commandcode login`')}`)
   }
   const started = await $.clock.now()
   const probe = await runCommandCode(
@@ -1992,11 +1996,13 @@ async function doctor($: $): Promise<string> {
     undefined,
   )
   const secs = Math.round(((await $.clock.now()) - started) / 1000)
-  if (probe.error) lines.push(`Deneme: HATA · ${explainError(probe.error)}`)
-  else if (!probe.text.trim()) lines.push(`Deneme: boş yanıt · ${probe.model || cfg.model} · ${secs} sn`)
-  else lines.push(`Deneme: OK · ${probe.model || cfg.model} · ${secs} sn · "${oneLine(probe.text, 40)}"`)
+  const test = tx('Test', 'Deneme')
+  const s = tx('s', 'sn')
+  if (probe.error) lines.push(`${test}: ${tx('ERROR', 'HATA')} · ${explainError(probe.error)}`)
+  else if (!probe.text.trim()) lines.push(`${test}: ${tx('empty reply', 'boş yanıt')} · ${probe.model || cfg.model} · ${secs} ${s}`)
+  else lines.push(`${test}: OK · ${probe.model || cfg.model} · ${secs} ${s} · "${oneLine(probe.text, 40)}"`)
   const u = await fetchUsage($, 0)
-  lines.push('error' in u ? `Kullanım: ${u.error}` : usageShort(u))
+  lines.push('error' in u ? `${tx('Usage', 'Kullanım')}: ${u.error}` : usageShort(u))
   return lines.join('\n')
 }
 
@@ -2009,9 +2015,12 @@ async function overview($: $): Promise<string> {
   const handoffs = await lastHandoffs($)
   const profiles = await ccAgents($)
   const last = handoffs[handoffs.length - 1]
+  const cliDefault = tx('CLI default', 'CLI varsayılanı')
+  const none = tx('- none', '- yok')
 
   const agentLines = Object.entries(agents).map(
-    ([name, rec]) => `- ${name}: ${rec.model || 'varsayılan model'}, ${rec.runs} çalışma, session ${rec.sessionId}`,
+    ([name, rec]) =>
+      `- ${name}: ${rec.model || cliDefault}, ${rec.runs} ${tx('runs', 'çalışma')}, session ${rec.sessionId}`,
   )
   const profileLines = profiles.map((agent) =>
     [
@@ -2028,43 +2037,56 @@ async function overview($: $): Promise<string> {
     .map(
       (run) =>
         `- ${run.status} · ${run.subagent ? `${run.subagent}/` : ''}${run.agent || 'one-off'} · ${
-          run.model || 'varsayılan'
-        } · ${run.mode} · ${Math.round(run.durationMs / 1000)} sn · ${run.inputTokens}/${run.outputTokens} tok · ${oneLine(
+          run.model || cliDefault
+        } · ${run.mode} · ${Math.round(run.durationMs / 1000)} ${tx('s', 'sn')} · ${run.inputTokens}/${run.outputTokens} tok · ${oneLine(
           run.preview,
           80,
         )}`,
     )
+  const always = tx('always', 'her zaman')
+  const asked = tx('asked', 'sorulur')
 
   return [
     'Command Code bridge',
-    `İzinler bu projede: read her zaman · edit ${g.edit ? 'her zaman' : 'sorulur'} (kabuk kapalı) · full ${
-      g.full ? 'her zaman' : 'sorulur'
-    }`,
-    `Yönlendirme: ${await routeState($, cfg)} · ${cfg.routeMode} · ${cfg.routeModel || cfg.model || 'CLI varsayılanı'}`,
-    `run aracı modeli: ${cfg.model || 'CLI varsayılanı'} · değiştir: /commandcode model <numara>`,
-    `Modeller: ${modelCount()} Command Code modeli · liste için /commandcode models`,
+    `${tx('Permissions in this project', 'İzinler bu projede')}: read ${always} · edit ${g.edit ? always : asked} (${tx(
+      'no shell',
+      'kabuk kapalı',
+    )}) · full ${g.full ? always : asked}`,
+    `${tx('Routing', 'Yönlendirme')}: ${await routeState($, cfg)} · ${cfg.routeMode} · ${cfg.routeModel || cfg.model || cliDefault}`,
+    `${tx('run tool model', 'run aracı modeli')}: ${cfg.model || cliDefault} · ${tx('change', 'değiştir')}: /commandcode model <n>`,
+    `${tx('Models', 'Modeller')}: ${modelCount()} · ${tx('list', 'liste')}: /commandcode models`,
     await usageOverview($),
-    `Ayarlar: ${Object.keys(DEFAULTS)
+    `${tx('Settings', 'Ayarlar')}: ${Object.keys(DEFAULTS)
       .filter((key) => !ROUTE_KEYS.includes(key))
       .map((key) => `${key}=${JSON.stringify((cfg as unknown as Record<string, unknown>)[key])}`)
       .join(' · ')}`,
-    `Cache: ${Object.keys(cache).length} yanıt, ${cfg.cacheTtlMin} dk · uyarı eşiği %${cfg.warnAtPercent}`,
+    `Cache: ${Object.keys(cache).length} ${tx('answers', 'yanıt')}, ${cfg.cacheTtlMin} ${tx('min', 'dk')} · ${tx(
+      'warn at',
+      'uyarı eşiği',
+    )} ${cfg.warnAtPercent}%`,
     '',
-    'Devretme:',
+    `${tx('Handoff', 'Devretme')}:`,
     ...(last
-      ? [`- son: ${new Date(last.at).toLocaleString('tr-TR')} · ${last.messages} mesaj · ${last.sessionId}`, `- ${last.command}`]
-      : ['- henüz yok; /commandcode handoff sohbeti kalıcı bir Command Code oturumuna yazar']),
+      ? [
+          `- ${tx('last', 'son')}: ${new Date(last.at).toLocaleString(locale())} · ${last.messages} ${tx('messages', 'mesaj')} · ${last.sessionId}`,
+          `- ${last.command}`,
+        ]
+      : [
+          tx(
+            '- none yet; /commandcode handoff writes the conversation as a lasting Command Code session',
+            '- henüz yok; /commandcode handoff sohbeti kalıcı bir Command Code oturumuna yazar',
+          ),
+        ]),
     '',
-    'Bu projedeki köprü ajanları:',
-    ...(agentLines.length ? agentLines : ['- yok']),
+    tx('Bridge agents in this project:', 'Bu projedeki köprü ajanları:'),
+    ...(agentLines.length ? agentLines : [none]),
     '',
-    'Command Code ajan profilleri (.commandcode/agents):',
-    ...(profileLines.length ? profileLines : ['- yok']),
+    tx('Command Code agent profiles (.commandcode/agents):', 'Command Code ajan profilleri (.commandcode/agents):'),
+    ...(profileLines.length ? profileLines : [none]),
     '',
-    'Son çalışmalar:',
-    ...(runLines.length ? runLines : ['- yok']),
+    tx('Recent runs:', 'Son çalışmalar:'),
+    ...(runLines.length ? runLines : [none]),
     '',
-    '',
-    HELP,
+    help(),
   ].join('\n')
 }
