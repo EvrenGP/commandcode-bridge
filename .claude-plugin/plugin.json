@@ -1,0 +1,6 @@
+{
+  "name": "commandcode-bridge",
+  "version": "0.4.5",
+  "description": "Runs Command Code agents (your Command Code subscription) as subagents: shares the conversation with them, reads their transcripts back, with permission tiers, a result cache, and a handoff that continues the whole conversation in Command Code when Claude's quota runs out",
+  "author": { "name": "Evren" }
+}

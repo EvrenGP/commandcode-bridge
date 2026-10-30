@@ -1,0 +1,12 @@
+{
+  "name": "commandcode-bridge",
+  "owner": { "name": "EvrenGP" },
+  "description": "Claude Code plugins that put a Command Code subscription to work beside Claude.",
+  "plugins": [
+    {
+      "name": "commandcode-bridge",
+      "source": "./",
+      "description": "Use your Command Code subscription (DeepSeek, Kimi, GLM, Qwen and more) from inside Claude Code: delegate tasks as subagents, route turns, hand off conversations, and watch your credit limits."
+    }
+  ]
+}
