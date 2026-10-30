@@ -104,6 +104,18 @@ A model can be picked by its list number, its full id, the part after the slash 
 
 If the CLI is not found, set `cliPath` to the CLI's `index.mjs` or executable name.
 
+## What it runs, reads and sends
+
+Everything the plugin does outside Claude Code, in full:
+
+- **Runs** the Command Code CLI you installed (`node <npm global>/command-code/dist/index.mjs`, or `cliPath`) as a child process, with the task on standard input. In the `edit` tier it passes this plugin's own `guard-edit-only.ts` to the CLI with `--mod`. To read the end of a transcript over 4 MiB it runs `node -e` with a short script written in `hooks/register.ts` (`readTail`) that only reads that file.
+- **Sends to Command Code** (through that CLI, to Command Code's servers, under your Command Code account): the task prompt and, when `context` is `recent` or `full`, the recent or full text of this conversation, capped by `maxContextChars`. Routed turns, `/compact` while routing is on, and `handoff` send or write the conversation the same way. Nothing is sent when you do not call `run`, route, compact while routing, or hand off.
+- **Reads** `~/.commandcode/auth.json` for your Command Code user name, login date and API key; Command Code transcripts under `~/.commandcode/projects/`; agent profiles under `.commandcode/agents` and `~/.commandcode/agents`.
+- **Fetches** your own usage from `https://api.commandcode.ai/alpha/billing/credits`, `/alpha/billing/subscriptions` and `/alpha/usage/summary`, sending the API key from `auth.json` as a Bearer token: the same requests Command Code's `/usage` makes. This happens for `/commandcode usage`, `/commandcode doctor`, the `/commandcode` overview, the `usage` tool, and once after each `run`. The key goes to no other host.
+- **Writes** a handoff transcript under `~/.commandcode/projects/` when you run `handoff`; keeps its settings, permissions, run history and answer cache in Claude Code's plugin store.
+
+It sends no telemetry and contacts no other server.
+
 ## Notes
 
 - The model list is copied from commandcode.ai/docs and is updated by hand.
