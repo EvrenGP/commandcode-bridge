@@ -740,9 +740,9 @@ async function sessionRouteOn($: Engine, claudeSessionId: string): Promise<boole
   return (await $.store.get(`routeon:${claudeSessionId}`)) === true
 }
 
-async function setSessionRoute($: Engine, claudeSessionId: string, on: boolean): Promise<void> {
+async function setSessionRoute($: Engine, claudeSessionId: string, enabled: boolean): Promise<void> {
   const key = `routeon:${claudeSessionId}`
-  if (on) await $.store.set(key, true)
+  if (enabled) await $.store.set(key, true)
   else await $.store.delete(key)
 }
 
