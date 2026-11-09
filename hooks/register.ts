@@ -52,6 +52,24 @@ type Config = {
   routeMode: string
   /** Interface language: en, tr, or auto (from the system locale). */
   lang: string
+  /** Hand each run a file map of the project, built here without a model, so the agent does not list folders itself. */
+  projectMap: boolean
+  /** Minutes a built map is reused before it is built again. */
+  mapTtlMin: number
+  /** Most characters of map a run gets. */
+  mapChars: number
+  /** Read-only one-off runs share one Command Code session per project, so files it already read are not read again. */
+  reuseSession: boolean
+  /** Tokens after which that shared session starts over. */
+  sessionTokenCap: number
+  /** Minutes of quiet after which that shared session starts over. */
+  sessionIdleMin: number
+  /** What a run shares of this conversation when the call names nothing: none, recent or full. */
+  defaultContext: string
+  /** Most characters of an answer handed back to Claude; the rest stays in the transcript. */
+  maxResultChars: number
+  /** Most characters of the prompt sent to Command Code (rules, map, conversation and task together). */
+  maxPromptChars: number
 }
 
 const DEFAULTS: Config = {
@@ -67,6 +85,17 @@ const DEFAULTS: Config = {
   routeModel: '',
   routeMode: 'edit',
   lang: 'auto',
+  projectMap: true,
+  mapTtlMin: 30,
+  mapChars: 12000,
+  reuseSession: true,
+  sessionTokenCap: 400000,
+  sessionIdleMin: 120,
+  // A self-contained prompt is the cheap and reliable default; "recent" costs the
+  // whole conversation tail on every run.
+  defaultContext: 'none',
+  maxResultChars: 20000,
+  maxPromptChars: 40000,
 }
 
 // --- language -------------------------------------------------------------
@@ -295,7 +324,10 @@ async function setConfigOf($: Engine, patch: Partial<Config>): Promise<void> {
   await $.store.set('config', { ...stored, ...patch })
 }
 
-type AgentRecord = { sessionId: string; model: string; updatedAt: number; runs: number }
+type AgentRecord = { sessionId: string; model: string; updatedAt: number; runs: number; tokens?: number }
+
+/** The shared read-only session of a project; see `reuseSession`. */
+const SCOUT = 'project-scout'
 type RunRecord = {
   id: string
   agent: string
@@ -484,9 +516,15 @@ async function permit($: Engine, mode: Mode, summary: string): Promise<{ ok: tru
 
 // --- the conversation, shared ---------------------------------------------
 
-/** Keeps the newest part when the text is over the limit: that is what the task is about. */
+/**
+ * Over the limit, keeps the start (the rules) and the newest part (the task), and
+ * cuts the middle: cutting the front once dropped the read-only rule.
+ */
 function assemblePrompt(text: string, max: number): string {
-  return text.length <= max ? text : `[... earlier part cut]\n\n${text.slice(-max)}`
+  if (text.length <= max) return text
+  const marker = '\n\n[... middle part cut]\n\n'
+  const headLen = Math.min(3000, Math.floor(max / 4))
+  return `${text.slice(0, headLen)}${marker}${text.slice(-(max - headLen - marker.length))}`
 }
 
 /**
@@ -527,26 +565,60 @@ async function buildContext(
   return body
 }
 
-function composePrompt(task: string, mode: Mode, context: string | null, profile: CcAgent | null, maxTurns: number): string {
+/**
+ * The run's prompt, kept under `max` section by section. The rules and the task
+ * are always whole (cutting the front once dropped "do not modify any file");
+ * the conversation loses its oldest part first, then the map its tail.
+ */
+function composePrompt(
+  task: string,
+  mode: Mode,
+  context: string | null,
+  profile: CcAgent | null,
+  maxTurns: number,
+  map: string,
+  folders: { root: string; extra: string[] },
+  max: number,
+): string {
   const rules =
     mode === 'read'
       ? 'Do not modify any file; read, search and reason only.'
       : mode === 'edit'
         ? 'You may edit files in this project, but do not run shell commands: this run blocks them. Keep changes to what the task needs.'
         : 'You may use every tool. Keep changes to what the task needs.'
-  const shared = context ? `\nThe calling conversation (newest last):\n\n${context}\n` : ''
   const role = profile
     ? `\nWork as the Command Code agent "${profile.name}" (${profile.source} agent definition at ${profile.path}). Follow its instructions:\n\n${clip(
         profile.body.trim(),
         6000,
       )}${profile.tools ? `\n\nIts declared tools: ${profile.tools}.` : ''}\n`
     : ''
-  return assemblePrompt(
-    `You are a subagent working for Claude Code. ${rules}${role}${shared}\n\nTask:\n${task}\n\n` +
-      `You have at most ${maxTurns} turns: batch tool calls, and keep the last turn for the answer. ` +
-      'End with a concise report: what you found or changed, files touched, anything left open.',
-    MAX_PROMPT,
-  )
+  const where =
+    `\nWorking folder: ${folders.root}` +
+    (folders.extra.length
+      ? `\nOther folders the task names: ${folders.extra.join(' ; ')} (your file tools may not reach them; if one is refused, say so in the answer)`
+      : '') +
+    '\nUse absolute paths for files outside the working folder.'
+  const head = `You are a subagent working for Claude Code. ${rules}${role}${where}`
+  const tail =
+    `\n\nTask:\n${task}\n\n` +
+    `You have at most ${maxTurns} turns: batch tool calls, and keep the last turn for the answer. ` +
+    'If a tool is denied or a path cannot be read, say which one in your answer instead of stopping. ' +
+    'End with a concise report: what you found or changed, files touched, anything left open.'
+  let room = Math.max(0, max - head.length - tail.length - 400)
+  let mapPart = ''
+  if (map && room > 0) {
+    const share = context ? Math.floor(room / 2) : room
+    const body = map.length <= share ? map : `${map.slice(0, share)}\n[... map cut]`
+    mapPart = `\n\nFile map (folders, files and sizes, listed by the caller; use it instead of listing folders, and read only the files you need):\n${body}`
+    room -= mapPart.length
+  }
+  let shared = ''
+  if (context && room > 200) {
+    const body = context.length <= room ? context : `[... earlier messages cut]\n\n${context.slice(-room)}`
+    shared = `\n\nThe calling conversation (newest last):\n\n${body}`
+  }
+  // Only a task longer than the whole budget is cut, from its middle: its start and end usually carry the ask.
+  return assemblePrompt(head + mapPart + shared + tail, Math.max(max, head.length + 2000))
 }
 
 function composeRoutePrompt(task: string, mode: Mode, context: string | null): string {
@@ -575,15 +647,26 @@ type RunOutcome = {
   error: string
   cancelled: boolean
   blocked: string[]
-  /** Command Code's own stop reason: end_turn, max_turns, interrupted, run_error. */
+  /** Tool calls Command Code refused (a path outside its workspace, mostly), with what they asked for. */
+  denied: { tool: string; input: unknown }[]
+  /** Command Code's own stop reason: end_turn, max_turns, permission_denied, interrupted, run_error. */
   stopReason: string
 }
 
-async function runCommandCode(
-  $: Engine,
-  args: { prompt: string; model: string; mode: Mode; resume: string; maxTurns: number; label: string },
-  signal: AbortSignal | undefined,
-): Promise<RunOutcome> {
+type RunArgs = {
+  prompt: string
+  model: string
+  mode: Mode
+  resume: string
+  maxTurns: number
+  label: string
+  /** Folder Command Code runs in; empty is the session's. */
+  cwd: string
+  /** Folders opened besides it (--add-dir). */
+  addDirs: string[]
+}
+
+async function runCommandCode($: Engine, args: RunArgs, signal: AbortSignal | undefined): Promise<RunOutcome> {
   const cfg = await config($)
   const argv = [
     ...(await cliArgv($, cfg)),
@@ -597,6 +680,7 @@ async function runCommandCode(
     '--no-auto-update',
     ...(args.model ? ['-m', args.model] : []),
     ...(args.resume ? ['--session', args.resume] : []),
+    ...args.addDirs.flatMap((dir) => ['--add-dir', dir]),
     ...(await modeFlags($, args.mode)),
   ]
   const out: RunOutcome = {
@@ -608,8 +692,10 @@ async function runCommandCode(
     error: '',
     cancelled: false,
     blocked: [],
+    denied: [],
     stopReason: '',
   }
+  const queued = new Map<string, { tool: string; input: unknown }>()
   let buffer = ''
   let turn = 0
   const status = (what: string) => $.ui.status(`Command Code · ${args.label} · ${what}`)
@@ -638,7 +724,15 @@ async function runCommandCode(
       else if (ev.type === 'model_request_end') usage(ev.usage)
       else if (ev.type === 'run_error') out.error = ev.error?.message ?? String(ev.error ?? 'run error')
       else if (ev.type === 'tool_hook_blocked') out.blocked.push(String(ev.toolName ?? 'tool'))
-      else if (ev.type === 'run_end') {
+      else if (ev.type === 'tool_queued' && ev.toolCallId) {
+        queued.set(String(ev.toolCallId), { tool: String(ev.toolName ?? 'tool'), input: ev.input })
+        if (ev.toolName) status(`${tx('turn', 'tur')} ${turn} · ${ev.toolName}`)
+      } else if (ev.type === 'tool_denied') {
+        // Headless Command Code denies what would need a prompt (a path outside its
+        // workspace) and ends the run there, with whatever it said first as its "answer".
+        const call = queued.get(String(ev.toolCallId ?? ''))
+        out.denied.push(call ?? { tool: String(ev.toolName ?? 'tool'), input: undefined })
+      } else if (ev.type === 'run_end') {
         const result = ev.result ?? {}
         if (typeof result.finalText === 'string') out.text = result.finalText
         if (typeof result.stopReason === 'string') out.stopReason = result.stopReason
@@ -650,6 +744,7 @@ async function runCommandCode(
       }
     } else if (row.type === 'result') {
       if (typeof row.finalText === 'string' && row.finalText) out.text = row.finalText
+      if (typeof row.stopReason === 'string' && row.stopReason) out.stopReason = row.stopReason
       if (row.sessionId) out.sessionId = row.sessionId
       usage(row.usage)
       if (row.subtype === 'error' && !out.error) out.error = String(row.error ?? 'error')
@@ -659,7 +754,7 @@ async function runCommandCode(
   let stderr = ''
   try {
     // The prompt goes over stdin: a conversation dump is far past a command line.
-    const child = $.process.spawn({ argv, input: args.prompt })
+    const child = $.process.spawn({ argv, input: args.prompt, ...(args.cwd ? { cwd: args.cwd } : {}) })
     for await (const piece of child) {
       if (!('stream' in piece)) break
       if (signal?.aborted) {
@@ -879,6 +974,200 @@ async function* streamRoute(
   if (!out.error && !out.text && !out.cancelled && out.stderr.trim()) {
     out.error = out.stderr.trim().split('\n').slice(-3).join(' ')
   }
+}
+
+// --- project map: what an agent would otherwise list folders for -----------
+
+const MAP_SKIP = new Set([
+  'node_modules', 'android', 'ios', 'dist', 'build', 'out', 'coverage', 'Pods', 'target', 'vendor', 'venv', '__pycache__',
+])
+const MAP_SKIP_LIKE = /^(dist|build|out|temp|tmp)[-_.]|^_|^\./
+const MAP_FILE = /\.(tsx?|jsx?|mjs|cjs|json|md|sql|py|go|rs|kt|java|swift|css|scss|html|toml|ya?ml|sh|ps1)$/i
+const MAP_CODE = /\.(tsx?|jsx?|mjs|cjs|sql|py|go|rs|kt|java|swift|css|scss|sh|ps1)$/i
+
+/** The plain folder names a .gitignore leaves out (`name/` or `/name`); patterns with wildcards are skipped. */
+function ignoredNames(text: string): string[] {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#') && !line.startsWith('!') && !/[*?[]/.test(line))
+    .map((line) => line.replace(/^\/+|\/+$/g, ''))
+    .filter((line) => line && !line.includes('/'))
+}
+
+/**
+ * Folders and their files with sizes, nothing read but directory listings and
+ * .gitignore files. Folders holding code come first; when the budget runs out
+ * the rest are named with their file count only.
+ */
+async function buildProjectMap($: Engine, root: string, maxChars: number): Promise<string> {
+  const dirs: { rel: string; files: string[]; code: boolean }[] = []
+  const queue: { rel: string; ignore: Set<string> }[] = [{ rel: '', ignore: new Set() }]
+  let seen = 0
+  while (queue.length && seen < 4000) {
+    const { rel, ignore: inherited } = queue.shift() as { rel: string; ignore: Set<string> }
+    const abs = rel ? join(root, rel) : root
+    let entries
+    try {
+      entries = await $.fs.list(abs)
+    } catch {
+      continue
+    }
+    const ignore = new Set(inherited)
+    if (entries.some((entry) => entry.name === '.gitignore' && entry.kind === 'file')) {
+      try {
+        for (const name of ignoredNames(String(await $.fs.read(join(abs, '.gitignore'))))) ignore.add(name)
+      } catch {
+        // An unreadable .gitignore only means less is skipped.
+      }
+    }
+    const files = entries
+      .filter((entry) => entry.kind === 'file' && MAP_FILE.test(entry.name) && !ignore.has(entry.name))
+      .sort((a, b) => a.name.localeCompare(b.name))
+    seen += files.length
+    if (files.length) {
+      dirs.push({
+        rel: rel || '.',
+        files: files.map((entry) => `${entry.name} ${entry.size >= 1024 ? `${Math.round(entry.size / 1024)}k` : `${entry.size}b`}`),
+        code: files.some((entry) => MAP_CODE.test(entry.name)),
+      })
+    }
+    for (const entry of entries) {
+      if (entry.kind !== 'dir' || MAP_SKIP.has(entry.name) || MAP_SKIP_LIKE.test(entry.name) || ignore.has(entry.name)) continue
+      queue.push({ rel: rel ? `${rel}/${entry.name}` : entry.name, ignore })
+    }
+  }
+
+  const ordered = [...dirs.filter((dir) => dir.code), ...dirs.filter((dir) => !dir.code)]
+  const full: string[] = []
+  const brief: string[] = []
+  let used = 0
+  for (const dir of ordered) {
+    const line = `${dir.rel}/: ${dir.files.join(', ')}`
+    if (used + line.length < maxChars * 0.85) {
+      full.push(line)
+      used += line.length + 1
+    } else {
+      brief.push(`${dir.rel}/ (${dir.files.length})`)
+    }
+  }
+  let text = full.sort().join('\n')
+  if (brief.length) text += `\nMore folders, file counts only: ${brief.sort().join(', ')}`
+  return text.length > maxChars ? `${text.slice(0, maxChars)} [...]` : text
+}
+
+// --- folders outside the project ---------------------------------------------
+//
+// Headless Command Code denies any tool call on a path outside its workspace
+// and ends the run. Folders a task names are opened with --add-dir up front,
+// and a run that still hits a denial is resumed once with the denied folders open.
+
+const ABS_WIN = /[A-Za-z]:[\\/][^\r\n"'`<>|*?]*/g
+const ABS_POSIX = /(?<![\w.~:-])\/(?:Users|home|mnt|Volumes|tmp|opt|srv|var|data|workspace)\/[^\r\n"'`<>|*?]*/g
+
+function pathKey(path: string, windows: boolean): string {
+  const trimmed = path.replace(/[\\/]+$/, '')
+  return windows ? trimmed.replace(/\//g, '\\').toLowerCase() : trimmed
+}
+
+function isUnder(child: string, parent: string, windows: boolean): boolean {
+  const c = pathKey(child, windows)
+  const p = pathKey(parent, windows)
+  return c === p || c.startsWith(p + (windows ? '\\' : '/'))
+}
+
+/**
+ * The nearest existing folder of a path written in prose: trailing words, a
+ * file name or a glob are dropped until something exists. Null for a drive or
+ * file system root (too wide to open).
+ */
+async function folderOf($: Engine, raw: string): Promise<string | null> {
+  let path = raw.trim()
+  for (let i = 0; i < 40 && path; i++) {
+    path = path.replace(/[\s.,;:!)\]}>]+$/, '')
+    const stat = await $.fs.stat(path).catch(() => undefined)
+    if (stat) {
+      const dir = stat.kind === 'dir' ? path : path.slice(0, Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/')))
+      return !dir || dir === '/' || /^[A-Za-z]:[\\/]?$/.test(dir) ? null : dir
+    }
+    const cut = Math.max(path.lastIndexOf(' '), path.lastIndexOf('\\'), path.lastIndexOf('/'), path.lastIndexOf('('))
+    if (cut <= 2) return null
+    path = path.slice(0, cut)
+  }
+  return null
+}
+
+/** Existing folders behind the absolute paths a text names. */
+async function foldersInText($: Engine, text: string, windows: boolean): Promise<string[]> {
+  const raws = [...(text.match(ABS_WIN) ?? []), ...(windows ? [] : (text.match(ABS_POSIX) ?? []))].slice(0, 20)
+  const found: string[] = []
+  for (const raw of raws) {
+    const dir = await folderOf($, raw)
+    if (dir) found.push(dir)
+  }
+  return found
+}
+
+/** Folders not under the working folder, an outer one swallowing those inside it; at most six. */
+function outsideFolders(dirs: string[], root: string, windows: boolean): string[] {
+  const kept: string[] = []
+  for (const dir of dirs) {
+    if (isUnder(dir, root, windows) || kept.some((other) => isUnder(dir, other, windows))) continue
+    for (let i = kept.length - 1; i >= 0; i--) if (isUnder(kept[i]!, dir, windows)) kept.splice(i, 1)
+    kept.push(dir)
+  }
+  return kept.slice(0, 6)
+}
+
+/** The deepest folder holding all of them, or null when that would be a drive or file system root. */
+function commonFolder(dirs: string[], windows: boolean): string | null {
+  if (!dirs.length) return null
+  const sep = windows ? '\\' : '/'
+  const parts = dirs.map((dir) => dir.replace(/[\\/]+$/, '').split(/[\\/]/))
+  const same = (a: string, b: string) => (windows ? a.toLowerCase() === b.toLowerCase() : a === b)
+  const first = parts[0]!
+  let n = first.length
+  for (const other of parts.slice(1)) {
+    let i = 0
+    while (i < n && i < other.length && same(first[i]!, other[i]!)) i++
+    n = i
+  }
+  // "D:" + one folder, or "" + one folder on POSIX, at the least.
+  return n >= 2 ? first.slice(0, n).join(sep) || null : null
+}
+
+/**
+ * Where a task runs. Headless Command Code's file tools only reach inside the
+ * folder it starts in (--add-dir opens the shell, not glob or read_file:
+ * checked on v1.88.2), so a task about folders elsewhere starts in them.
+ */
+function workFolderFor(named: string[], sessionCwd: string, windows: boolean): string {
+  if (!named.length || named.some((dir) => isUnder(dir, sessionCwd, windows))) return sessionCwd
+  const outside = outsideFolders(named, sessionCwd, windows)
+  return commonFolder(outside, windows) ?? outside[0] ?? sessionCwd
+}
+
+/** Every absolute path among a tool call's arguments. */
+function pathsIn(value: unknown, acc: string[] = []): string[] {
+  if (typeof value === 'string') {
+    if (/^[A-Za-z]:[\\/]|^\/[^/]/.test(value)) acc.push(value)
+  } else if (Array.isArray(value)) {
+    for (const item of value) pathsIn(item, acc)
+  } else if (value && typeof value === 'object') {
+    for (const item of Object.values(value)) pathsIn(item, acc)
+  }
+  return acc
+}
+
+/** The project's map, from the store while it is fresh. */
+async function projectMapFor($: Engine, cfg: Config, root: string): Promise<string> {
+  const key = `map:${root.toLowerCase()}`
+  const now = await $.clock.now()
+  const stored = (await $.store.get(key)) as { at: number; text: string } | undefined
+  if (stored && now - stored.at < cfg.mapTtlMin * 60000) return stored.text
+  const text = await buildProjectMap($, root, cfg.mapChars)
+  await $.store.set(key, { at: now, text })
+  return text
 }
 
 // --- records --------------------------------------------------------------
@@ -1167,12 +1456,13 @@ export const register: Register = (on) => {
       description:
         "Delegate a task to a Command Code agent (the user's Command Code subscription, its own models such as DeepSeek, Kimi, GLM, Qwen) as a subagent. " +
         'Use it when the user asks for Command Code, for a second opinion from another model, or to offload a self-contained task to save Claude tokens: ' +
-        'broad searches, reading and summarising many files, drafts, mechanical edits. The default model is a fast DeepSeek; pass `context: "none"` with a self-contained prompt for the cheapest run. ' +
-        'Give `agent` a name to keep a persistent Command Code session for follow-ups; leave it out for a one-off run. ' +
+        'broad searches, reading and summarising many files, drafts, mechanical edits. The default model is a fast DeepSeek. Write a self-contained prompt with absolute paths. ' +
+        'Folders outside this project that the prompt names are opened to it automatically; set `cwd` to run it in another folder (its file map and shared session follow), or list extra folders in `dirs`. ' +
+        'Give `agent` a name to keep a persistent Command Code session for related follow-ups (it remembers what it read); leave it out for a one-off run. ' +
         '`subagent` runs the task as one of the Command Code agent profiles on disk (.commandcode/agents or ~/.commandcode/agents). ' +
-        '`context` shares this conversation with it: "recent" (default) the last messages, "full" all, "none" nothing. ' +
+        '`context` shares this conversation with it: "none" (default, cheapest), "recent" the last messages, "full" all. ' +
         '`mode`: "read" (default, no file changes), "edit" (may edit files, never runs shell commands), "full" (every tool); edit and full ask the user. ' +
-        'Returns its final report, its session id and the transcript path; read the transcript with the transcript tool.',
+        'Returns its final report (long ones cut, the rest in the transcript), its session id and the transcript path; read the transcript with the transcript tool. An "isError" result says why it stopped; do not retry the same call unchanged.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -1184,6 +1474,12 @@ export const register: Register = (on) => {
           context: { type: 'string', enum: ['none', 'recent', 'full'] },
           useCache: { type: 'boolean', description: 'Reuse a recent identical read-only answer (default true).' },
           maxTurns: { type: 'number' },
+          cwd: { type: 'string', description: 'Absolute folder to run in, when the task is about another project or folder.' },
+          dirs: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Extra absolute folders it may read (or edit, in the edit tier) besides its working folder.',
+          },
         },
         required: ['prompt'],
       },
@@ -1346,12 +1642,36 @@ export const register: Register = (on) => {
       context?: ContextScope
       useCache?: boolean
       maxTurns?: number
+      cwd?: string
+      dirs?: string[]
     }
     if (!input.prompt?.trim()) return { result: 'The `prompt` is empty.', isError: true }
 
     const cfg = await config($)
     const mode: Mode = input.mode === 'edit' || input.mode === 'full' ? input.mode : 'read'
-    const scope: ContextScope = input.context === 'none' || input.context === 'full' ? input.context : 'recent'
+    const scopeOf = (value: unknown): ContextScope | null =>
+      value === 'none' || value === 'recent' || value === 'full' ? value : null
+    const scope: ContextScope = scopeOf(input.context) ?? scopeOf(cfg.defaultContext) ?? 'none'
+
+    // Where it runs and what it may read: the folder the call names, else the
+    // session's; plus every folder outside it that the task or `dirs` names.
+    const windows = await isWindows($)
+    const sessionCwd = await $.session.cwd()
+    let workdir = sessionCwd
+    if (input.cwd?.trim()) {
+      const given = await folderOf($, input.cwd.trim())
+      if (!given) return { result: `\`cwd\` is not an existing folder: ${input.cwd}`, isError: true }
+      workdir = given
+    }
+    const named = await foldersInText($, input.prompt, windows)
+    for (const dir of input.dirs ?? []) {
+      const found = typeof dir === 'string' ? await folderOf($, dir) : null
+      if (found) named.push(found)
+    }
+    // A task only about folders elsewhere runs there, with that folder's map and shared session.
+    if (!input.cwd?.trim()) workdir = workFolderFor(named, sessionCwd, windows)
+    let addDirs = outsideFolders(named, workdir, windows)
+    const mapRoot = workdir
     const agentName = (input.agent ?? '').trim().replace(/[^\w-]/g, '-').slice(0, 40)
     const profileName = (input.subagent ?? '').trim()
 
@@ -1396,14 +1716,27 @@ export const register: Register = (on) => {
     }
 
     const agents = await agentsOf($)
-    const known = agentName ? agents[agentName] : undefined
-    const model = (input.model ?? profile?.model ?? known?.model ?? cfg.model).trim()
+    // A read-only one-off run joins the shared session of the folder it works on,
+    // so what it read there before is still there.
+    const scoutName = isUnder(mapRoot, sessionCwd, windows) ? SCOUT : `${SCOUT}-${hash(pathKey(mapRoot, windows)).slice(0, 6)}`
+    const sessionName = agentName || (mode === 'read' && cfg.reuseSession && !profileName ? scoutName : '')
+    const known = sessionName ? agents[sessionName] : undefined
+    const model = (input.model ?? profile?.model ?? (agentName ? known?.model : undefined) ?? cfg.model).trim()
+    // The shared session starts over when it grew large, went quiet, or ran another model.
+    const resumable =
+      !!known &&
+      (!!agentName ||
+        (known.model === model &&
+          (known.tokens ?? 0) < cfg.sessionTokenCap &&
+          now - known.updatedAt < cfg.sessionIdleMin * 60000))
     const context = await buildContext($, scope, cfg)
 
     // Only a read-only one-off run is cached: an agent's run moves its session on,
     // and an edit changes the files the answer was about.
     const contextDigest = context ? hash(context) : '-'
-    const cacheKey = hash(JSON.stringify([await projectKey($), model, profileName, input.prompt, scope, contextDigest]))
+    const cacheKey = hash(
+      JSON.stringify([await projectKey($), workdir, addDirs, model, profileName, input.prompt, scope, contextDigest]),
+    )
     const cacheable = mode === 'read' && !agentName && input.useCache !== false
     if (cacheable) {
       const hit = await cacheGet($, cacheKey, cfg.cacheTtlMin)
@@ -1427,17 +1760,78 @@ export const register: Register = (on) => {
     }
 
     const maxTurns = Math.max(1, Math.min(200, Math.round(input.maxTurns ?? cfg.maxTurns)))
-    const runArgs = {
-      prompt: composePrompt(input.prompt, mode, context, profile, maxTurns),
+    const runArgs: RunArgs = {
+      // A resumed session already holds the map.
+      prompt: composePrompt(
+        input.prompt,
+        mode,
+        context,
+        profile,
+        maxTurns,
+        cfg.projectMap && !resumable ? await projectMapFor($, cfg, mapRoot) : '',
+        { root: workdir, extra: addDirs },
+        cfg.maxPromptChars,
+      ),
       model,
       mode,
-      resume: known?.sessionId ?? '',
+      resume: resumable && known ? known.sessionId : '',
       maxTurns,
       label,
+      cwd: workdir === sessionCwd ? '' : workdir,
+      addDirs,
     }
+    const merge = (first: RunOutcome, later: RunOutcome): RunOutcome => ({
+      ...later,
+      inputTokens: first.inputTokens + later.inputTokens,
+      outputTokens: first.outputTokens + later.outputTokens,
+      blocked: [...first.blocked, ...later.blocked],
+    })
     let outcome = await runCommandCode($, runArgs, next.signal)
-    if (retriable(outcome.text, outcome.error, outcome.cancelled)) {
-      outcome = await runCommandCode($, { ...runArgs, label: `${label} · ${tx('retry', '2. deneme')}` }, next.signal)
+
+    // A denied path ends a headless run at once. Open the folders it was denied
+    // and continue that same session once; it keeps what it already read.
+    const live = (o: RunOutcome) => !o.cancelled && !o.error
+    if (outcome.stopReason === 'permission_denied' && live(outcome) && outcome.sessionId) {
+      const wanted: string[] = []
+      for (const call of outcome.denied) {
+        for (const path of pathsIn(call.input)) {
+          const dir = await folderOf($, path)
+          if (dir) wanted.push(dir)
+        }
+      }
+      // Its file tools reach only the folder it starts in: continue the same
+      // session there (a session resumes from any folder), the old one kept as an extra.
+      const outside = outsideFolders(wanted, workdir, windows)
+      const target = commonFolder(outside, windows) ?? outside[0]
+      if (target) {
+        addDirs = outsideFolders([workdir, ...addDirs, ...outside], target, windows)
+        workdir = target
+        runArgs.cwd = target
+        runArgs.addDirs = addDirs
+        const again = await runCommandCode(
+          $,
+          {
+            ...runArgs,
+            prompt: `You now run inside ${target}, the folder you were denied. Continue the task from where you stopped and give the final answer in the format it asked for.`,
+            resume: outcome.sessionId,
+            label: `${label} · ${tx('moved to the folder', 'klasöre geçildi')}`,
+          },
+          next.signal,
+        )
+        outcome = merge(outcome, again)
+      }
+    }
+    if (outcome.stopReason === 'permission_denied' && live(outcome)) {
+      const what = outcome.denied
+        .map((call) => `${call.tool}${pathsIn(call.input).length ? ` ${pathsIn(call.input).join(', ')}` : ''}`)
+        .join('; ')
+      const said = outcome.text.trim() ? ` Its last words, not an answer: "${oneLine(outcome.text, 200)}"` : ''
+      outcome.error =
+        `Command Code stopped: it was denied ${what || 'a tool'} (${mode} tier). ` +
+        `Pass the folder as \`cwd\` or in \`dirs\`, or use a higher tier if it needs a tool this tier withholds.${said}`
+      outcome.text = ''
+    } else if (retriable(outcome.text, outcome.error, outcome.cancelled)) {
+      outcome = merge(outcome, await runCommandCode($, { ...runArgs, label: `${label} · ${tx('retry', '2. deneme')}` }, next.signal))
     }
     // The turn limit cut the work before its report: the text is whatever the
     // agent said early on. Resume that session once, tools off in spirit, for the answer.
@@ -1487,12 +1881,13 @@ export const register: Register = (on) => {
       outputTokens: outcome.outputTokens,
       preview: (outcome.error || outcome.text).slice(0, 160),
     })
-    if (agentName && outcome.sessionId && !outcome.cancelled) {
-      await saveAgent($, agentName, {
+    if (sessionName && outcome.sessionId && !outcome.cancelled) {
+      await saveAgent($, sessionName, {
         sessionId: outcome.sessionId,
         model: outcome.model || model,
         updatedAt: now,
-        runs: (known?.runs ?? 0) + 1,
+        runs: (resumable ? (known?.runs ?? 0) : 0) + 1,
+        tokens: (resumable ? (known?.tokens ?? 0) : 0) + outcome.inputTokens + outcome.outputTokens,
       })
     }
     const transcriptPath = outcome.sessionId ? await findTranscript($, outcome.sessionId) : null
@@ -1526,8 +1921,23 @@ export const register: Register = (on) => {
 [Tur limiti iki kez doldu: bu cevap eksik olabilir. Daha yüksek maxTurns ya da daha dar bir görevle tekrar çalıştır.]`,
         )
       : ''
-    const text = clip(outcome.text || tx('(no final text)', '(son metin yok)'), MAX_RESULT) + limitNote
-    if (cacheable && !cutShort) await cachePut($, cacheKey, { at: now, text, meta }, cfg.cacheTtlMin)
+    // Any other early stop (interrupted, a run error with some text) is not a finished answer either.
+    const finished = !outcome.stopReason || outcome.stopReason === 'end_turn' || outcome.stopReason === 'max_turns'
+    const stopNote = finished
+      ? ''
+      : tx(
+          `\n\n[Command Code stopped early (${outcome.stopReason}): this may not be a complete answer.]`,
+          `\n\n[Command Code erken durdu (${outcome.stopReason}): bu cevap eksik olabilir.]`,
+        )
+    // Claude's context pays for every character handed back: the rest stays in the transcript.
+    const limit = Math.max(2000, Math.min(MAX_RESULT, cfg.maxResultChars))
+    const raw = outcome.text || tx('(no final text)', '(son metin yok)')
+    const body =
+      raw.length <= limit
+        ? raw
+        : `${raw.slice(0, limit)}\n[... ${raw.length - limit} ${tx('characters cut; read the rest with the transcript tool', 'karakter kesildi; devamı transcript aracıyla okunur')}${outcome.sessionId ? ` (session ${outcome.sessionId})` : ''}]`
+    const text = body + limitNote + stopNote
+    if (cacheable && !cutShort && finished) await cachePut($, cacheKey, { at: now, text, meta }, cfg.cacheTtlMin)
     return { result: `${text}${blocked}\n\n---\n${meta}` }
   })
 
@@ -1596,6 +2006,8 @@ export const register: Register = (on) => {
         resume: '',
         maxTurns: 1,
         label: 'model.complete',
+        cwd: '',
+        addDirs: [],
       },
       undefined,
     )
@@ -1654,6 +2066,8 @@ export const register: Register = (on) => {
         resume: '',
         maxTurns: 1,
         label: 'compact',
+        cwd: '',
+        addDirs: [],
       },
       undefined,
     )
@@ -2034,7 +2448,7 @@ async function doctor($: Engine): Promise<string> {
   const started = await $.clock.now()
   const probe = await runCommandCode(
     $,
-    { prompt: 'Reply with exactly: PONG', model: cfg.model, mode: 'read', resume: '', maxTurns: 1, label: 'doctor' },
+    { prompt: 'Reply with exactly: PONG', model: cfg.model, mode: 'read', resume: '', maxTurns: 1, label: 'doctor', cwd: '', addDirs: [] },
     undefined,
   )
   const secs = Math.round(((await $.clock.now()) - started) / 1000)

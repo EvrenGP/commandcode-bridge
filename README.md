@@ -77,7 +77,7 @@ A model can be picked by its list number, its full id, the part after the slash 
 
 ## Tools Claude can call
 
-- `run`: delegate a task. `model` (default `deepseek/deepseek-v4.1-flash-fast`), `agent` (a named, persistent session for follow-ups), `subagent` (a Command Code agent profile from `.commandcode/agents`), `context` (`none`, `recent`, `full`: how much of the conversation to share), `mode` (`read`, `edit`, `full`). The result ends with the model, time, tokens, session id and credits left.
+- `run`: delegate a task. `model` (default `deepseek/deepseek-v4.1-flash-fast`), `agent` (a named, persistent session for follow-ups), `subagent` (a Command Code agent profile from `.commandcode/agents`), `context` (`none` by default, `recent`, `full`: how much of the conversation to share), `mode` (`read`, `edit`, `full`), `cwd` (run in another folder) and `dirs` (extra folders). A task about folders outside the project runs inside them automatically: Command Code's file tools only reach the folder it starts in. The result ends with the model, time, tokens, session id and credits left.
 - `transcript`: read what a Command Code session did.
 - `agents`: list or reset bridge agents.
 - `models`: the numbered model list.
@@ -100,7 +100,13 @@ A model can be picked by its list number, its full id, the part after the slash 
 
 ## Settings
 
-`/commandcode set <key> <value>`: `cliPath`, `model`, `cacheTtlMin`, `maxContextChars`, `recentMessages`, `maxTurns`, `handoffThinking`, `warnAtPercent`, `route`, `routeModel`, `routeMode`, `lang` (`auto`, `en`, `tr`).
+`/commandcode set <key> <value>`: `cliPath`, `model`, `cacheTtlMin`, `maxContextChars`, `recentMessages`, `maxTurns`, `handoffThinking`, `warnAtPercent`, `route`, `routeModel`, `routeMode`, `lang` (`auto`, `en`, `tr`), `projectMap`, `mapTtlMin`, `mapChars`, `reuseSession`, `sessionTokenCap`, `sessionIdleMin`, `defaultContext`, `maxResultChars`, `maxPromptChars`.
+
+## Saving tokens
+
+- Every run gets a **project map**: folders and files with sizes, built by the plugin from directory listings (no model, cached `mapTtlMin` minutes, at most `mapChars` characters, `.gitignore` honoured). The agent opens the files it needs instead of listing folders.
+- Read-only one-off runs share **one Command Code session per project** (`project-scout`), so a file read for one task is still known in the next. It starts over after `sessionTokenCap` tokens, `sessionIdleMin` quiet minutes, or a model change.
+- Identical read-only questions within `cacheTtlMin` minutes are answered from the **answer cache** without a new run.
 
 If the CLI is not found, set `cliPath` to the CLI's `index.mjs` or executable name.
 
